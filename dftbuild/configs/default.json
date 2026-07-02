@@ -1,0 +1,16 @@
+{
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "electrolyte": {
+    "water_count": 30,
+    "tolerance": 2.0,
+    "relax_steps": 1000
+  },
+  "output_dir": "outputs/default"
+}

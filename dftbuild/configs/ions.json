@@ -1,0 +1,39 @@
+{
+  "monatomic": {
+    "Na+": {"symbol": "Na", "smiles": "[Na+]"},
+    "K+": {"symbol": "K", "smiles": "[K+]"},
+    "Li+": {"symbol": "Li", "smiles": "[Li+]"},
+    "Cs+": {"symbol": "Cs", "smiles": "[Cs+]"},
+    "Mg2+": {"symbol": "Mg", "smiles": "[Mg+2]"},
+    "Ca2+": {"symbol": "Ca", "smiles": "[Ca+2]"},
+    "Ba2+": {"symbol": "Ba", "smiles": "[Ba+2]"},
+    "Rb+": {"symbol": "Rb", "smiles": "[Rb+]"},
+    "Zn2+": {"symbol": "Zn", "smiles": "[Zn+2]"},
+    "Cd2+": {"symbol": "Cd", "smiles": "[Cd+2]"},
+    "Sr2+": {"symbol": "Sr", "smiles": "[Sr+2]"},
+    "F-": {"symbol": "F", "smiles": "[F-]"},
+    "Cl-": {"symbol": "Cl", "smiles": "[Cl-]"},
+    "Br-": {"symbol": "Br", "smiles": "[Br-]"},
+    "I-": {"symbol": "I", "smiles": "[I-]"}
+  },
+  "polyatomic": {
+    "OH-": {"smiles": "[O-]", "positions": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]], "symbols": ["O", "H"]},
+    "SO4(2-)": {"smiles": "S(=O)(=O)([O-])[O-]"},
+    "CO3(2-)": {"smiles": "C(=O)([O-])[O-]"},
+    "HCO3(-)": {"smiles": "OC(=O)[O-]"},
+    "NO3(-)": {"smiles": "[N+](=O)([O-])[O-]"},
+    "PO4(3-)": {"smiles": "P(=O)([O-])([O-])[O-]"},
+    "HPO4(2-)": {"smiles": "OP(=O)([O-])[O-]"},
+    "H2PO4(-)": {"smiles": "OP(=O)(O)[O-]"}
+  },
+  "smiles_map": {
+    "Na+": "[Na+]", "K+": "[K+]", "Li+": "[Li+]", "Cs+": "[Cs+]",
+    "Mg2+": "[Mg+2]", "Ca2+": "[Ca+2]", "Ba2+": "[Ba+2]", "Rb+": "[Rb+]",
+    "Zn2+": "[Zn+2]", "Cd2+": "[Cd+2]", "Sr2+": "[Sr+2]",
+    "F-": "[F-]", "Cl-": "[Cl-]", "Br-": "[Br-]", "I-": "[I-]",
+    "OH-": "[O-]", "SO4(2-)": "S(=O)(=O)([O-])[O-]",
+    "CO3(2-)": "C(=O)([O-])[O-]", "HCO3(-)": "OC(=O)[O-]",
+    "NO3(-)": "[N+](=O)([O-])[O-]", "PO4(3-)": "P(=O)([O-])([O-])[O-]",
+    "HPO4(2-)": "OP(=O)([O-])[O-]", "H2PO4(-)": "OP(=O)(O)[O-]"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "materials_project": {
+    "api_key": "YOUR_API_KEY_HERE",
+    "description": "Materials Project - 150K+ computed material structures. Get free API key at https://materialsproject.org/api"
+  },
+  "cod": {
+    "description": "Crystallography Open Database - 300K+ experimental structures, free no key needed"
+  },
+  "manual": {
+    "description": "Manually build known structures (FCC/BCC/fluorite etc.)"
+  }
+}
