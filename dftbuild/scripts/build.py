@@ -13,6 +13,9 @@ Builds crystal structures from various sources:
 
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -944,6 +947,311 @@ VDW_RADIUS = {
 }
 
 
+# ─── Packmol electrolyte builder ─────────────────────────────────────
+
+IONS_CONFIG_PATH = SKILL_ROOT / "configs" / "ions.json"
+
+# TIP3P water geometry (O-H bond 0.9572 A, angle 104.52 deg)
+WATER_POSITIONS = [
+    (0.0000, 0.0000, 0.0000),    # O
+    (0.9572, 0.0000, 0.0000),    # H1
+    (-0.2400, 0.9266, 0.0000),   # H2
+]
+
+
+def _load_ions_config() -> dict:
+    """Load ion SMILES definitions from configs/ions.json."""
+    with open(IONS_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def _generate_molecule_xyz(name: str, smiles: str = None, tmp_dir: Path = None) -> Path:
+    """Generate XYZ file for a molecule/ion using RDKit or hardcoded geometry.
+
+    Returns path to the XYZ file.
+    """
+    if name == "H2O":
+        return _write_xyz_file("H2O", ["O", "H", "H"], WATER_POSITIONS, tmp_dir)
+
+    ions_config = _load_ions_config()
+    smiles_map = ions_config.get("smiles_map", {})
+
+    # Check monatomic ions with direct symbol (no RDKit needed)
+    monatomic = ions_config.get("monatomic", {})
+    if name in monatomic and "symbol" in monatomic[name]:
+        symbol = monatomic[name]["symbol"]
+        return _write_xyz_file(name, [symbol], [(0.0, 0.0, 0.0)], tmp_dir)
+
+    # Check polyatomic ions with hardcoded positions first
+    polyatomic = ions_config.get("polyatomic", {})
+    if name in polyatomic and "positions" in polyatomic[name]:
+        ion = polyatomic[name]
+        return _write_xyz_file(name, ion["symbols"], ion["positions"], tmp_dir)
+
+    # Use SMILES (from config or provided) + RDKit
+    if smiles is None:
+        smiles = smiles_map.get(name)
+    if smiles:
+        return _rdkit_xyz_from_smiles(name, smiles, tmp_dir)
+
+    # Single atom fallback
+    symbol = name.replace("+", "").replace("-", "").replace("2", "").replace("3", "")
+    return _write_xyz_file(name, [symbol], [(0.0, 0.0, 0.0)], tmp_dir)
+
+
+def _write_xyz_file(name: str, symbols: list, positions: list, tmp_dir: Path) -> Path:
+    """Write an XYZ file for Packmol."""
+    safe_name = name.replace("+", "plus").replace("-", "minus").replace("(", "").replace(")", "")
+    path = tmp_dir / f"{safe_name}.xyz"
+    lines = [str(len(symbols)), f"{name}"]
+    for sym, pos in zip(symbols, positions):
+        lines.append(f"{sym}  {pos[0]:.6f}  {pos[1]:.6f}  {pos[2]:.6f}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _rdkit_xyz_from_smiles(name: str, smiles: str, tmp_dir: Path) -> Path:
+    """Generate 3D XYZ from SMILES using RDKit."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError:
+        raise RuntimeError(
+            f"RDKit required for SMILES '{smiles}'. "
+            "Install with: conda install -c conda-forge rdkit"
+        )
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"RDKit could not parse SMILES: {smiles}")
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.randomSeed = 2026
+    if AllChem.EmbedMolecule(mol, params) != 0:
+        raise ValueError(f"RDKit could not embed 3D conformer for: {smiles}")
+    try:
+        AllChem.MMFFOptimizeMolecule(mol)
+    except Exception:
+        AllChem.UFFOptimizeMolecule(mol)
+
+    conf = mol.GetConformer()
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    positions = [
+        (conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y, conf.GetAtomPosition(i).z)
+        for i in range(mol.GetNumAtoms())
+    ]
+    return _write_xyz_file(name, symbols, positions, tmp_dir)
+
+
+def _ion_packmol_box(x_length, y_length, z_min, z_max, margin, z_fraction):
+    """Compute ion placement box with lateral margins."""
+    x_margin = min(max(margin, 0.5), max(0.5, x_length / 2.0 - 0.25))
+    y_margin = min(max(margin, 0.5), max(0.5, y_length / 2.0 - 0.25))
+    z_span = z_max - z_min
+    return (
+        x_margin, y_margin, z_min + z_fraction[0] * z_span,
+        max(x_margin + 0.25, x_length - x_margin),
+        max(y_margin + 0.25, y_length - y_margin),
+        z_min + z_fraction[1] * z_span,
+    )
+
+
+def _format_box(box):
+    return " ".join(f"{v:.4f}" for v in box)
+
+
+def build_electrolyte_packmol(
+    atoms: Atoms,
+    electrolyte_cfg: dict,
+    output_dir: str,
+) -> Atoms:
+    """Build water + ions + solvents using Packmol with layered constraints.
+
+    Strategy:
+    [1] Place ions inside box (with lateral margin + z_fraction constraints)
+    [2] Place water inside box (covers full region, surrounds ions)
+    [3] Place organic solvents inside box (optional)
+
+    Parameters
+    ----------
+    atoms : Atoms
+        Surface slab with possible adsorbates.
+    electrolyte_cfg : dict
+        Config keys: water_count, ions, solvents, tolerance, seed,
+        ion_lateral_margin, ion_z_fraction, z_offset, layer_height.
+    output_dir : str
+        Directory for Packmol working files and output.
+
+    Returns
+    -------
+    Atoms
+        Slab with packed electrolyte atoms added.
+    """
+    water_count = electrolyte_cfg.get('water_count', 0)
+    ions = electrolyte_cfg.get('ions', {})
+    solvents = electrolyte_cfg.get('solvents', {})
+    # Handle legacy ethanol_count
+    ethanol_count = electrolyte_cfg.get('ethanol_count', 0)
+    if ethanol_count > 0 and 'ETOH' not in solvents:
+        solvents['ETOH'] = ethanol_count
+
+    tolerance = electrolyte_cfg.get('tolerance', 2.0)
+    seed = electrolyte_cfg.get('seed', 12345)
+    ion_lateral_margin = electrolyte_cfg.get('ion_lateral_margin', 2.5)
+    ion_z_fraction = electrolyte_cfg.get('ion_z_fraction', (0.2, 0.8))
+    z_offset = electrolyte_cfg.get('z_offset', 3.0)
+    layer_height = electrolyte_cfg.get('layer_height', 10.0)
+
+    molecule_counts = {}
+    if water_count > 0:
+        molecule_counts['H2O'] = water_count
+    for ion_name, count in ions.items():
+        if count > 0:
+            molecule_counts[ion_name] = count
+    for solv_name, count in solvents.items():
+        if count > 0:
+            molecule_counts[solv_name] = count
+
+    if not molecule_counts:
+        return atoms.copy()
+
+    # Find Packmol executable
+    packmol_bin = shutil.which("packmol")
+    if packmol_bin is None:
+        # Try python-packmol Scripts location
+        scripts_candidate = Path(sys.executable).parent / "Scripts" / "packmol.exe"
+        if scripts_candidate.exists():
+            packmol_bin = str(scripts_candidate)
+        else:
+            raise RuntimeError(
+                "Packmol not found. Install with: pip install packmol"
+            )
+
+    model = atoms.copy()
+    x_length, y_length, _ = model.cell.lengths()
+    top_z = float(max(model.positions[:, 2]))
+    z_min = top_z + z_offset
+    z_max = z_min + layer_height
+
+    # Ion box: constrained with margins
+    ion_box = _ion_packmol_box(x_length, y_length, z_min, z_max,
+                               ion_lateral_margin, ion_z_fraction)
+    # Water/solvent box: full region
+    water_box = (0.5, 0.5, z_min, max(0.6, x_length - 0.5),
+                 max(0.6, y_length - 0.5), z_max)
+
+    work_dir = Path(output_dir) / "packmol_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate molecule XYZ files
+    molecule_files = {}
+    for name in molecule_counts:
+        xyz_path = _generate_molecule_xyz(name, tmp_dir=work_dir)
+        molecule_files[name] = xyz_path
+
+    # Generate Packmol input
+    input_lines = [
+        f"tolerance {tolerance:.4f}",
+        "filetype xyz",
+        "output packed.xyz",
+        f"seed {seed}",
+        "",
+    ]
+
+    # Water first (covers full region)
+    if water_count > 0:
+        input_lines.extend([
+            f"structure {molecule_files['H2O'].name}",
+            f"  number {water_count}",
+            f"  inside box {_format_box(water_box)}",
+            "end structure",
+            "",
+        ])
+
+    # Solvents (full region)
+    for solv_name, count in solvents.items():
+        if count > 0 and solv_name in molecule_files:
+            input_lines.extend([
+                f"structure {molecule_files[solv_name].name}",
+                f"  number {count}",
+                f"  inside box {_format_box(water_box)}",
+                "end structure",
+                "",
+            ])
+
+    # Ions last (constrained box)
+    for ion_name, count in ions.items():
+        if count > 0 and ion_name in molecule_files:
+            input_lines.extend([
+                f"structure {molecule_files[ion_name].name}",
+                f"  number {count}",
+                f"  inside box {_format_box(ion_box)}",
+                "end structure",
+                "",
+            ])
+
+    input_path = work_dir / "packmol.inp"
+    output_path = work_dir / "packed.xyz"
+    input_path.write_text("\n".join(input_lines), encoding="utf-8")
+
+    # Run Packmol
+    print(f"  Running Packmol: {sum(molecule_counts.values())} molecules "
+          f"({', '.join(f'{v} {k}' for k, v in molecule_counts.items())})...")
+    result = subprocess.run(
+        [packmol_bin, "-i", str(input_path)],
+        cwd=str(work_dir),
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(
+            f"Packmol failed.\nreturncode: {result.returncode}\n"
+            f"stdout:\n{result.stdout[-500:]}\nstderr:\n{result.stderr[-500:]}"
+        )
+
+    packed = ase_read(str(output_path), format="xyz")
+    model += packed
+    model.cell = atoms.cell
+    model.pbc = atoms.pbc
+    print(f"  Packmol completed: {len(packed)} atoms added, total {len(model)}")
+    return model
+
+
+# ─── ASE LJ relaxation ─────────────────────────────────────────────
+
+def relax_structure(atoms: Atoms, steps: int = 1000, fmax: float = 0.5) -> Atoms:
+    """Run short LJ relaxation to remove close contacts from Packmol.
+
+    Uses ASE's built-in Lennard-Jones calculator (no force field file needed).
+    Fixes the bottom slab region and only relaxes electrolyte atoms.
+    """
+    if steps <= 0:
+        return atoms.copy()
+
+    from ase.calculators.lj import LennardJones
+    from ase.constraints import FixAtoms
+    from ase.optimize import BFGS
+
+    relaxed = atoms.copy()
+    relaxed.calc = LennardJones(epsilon=0.01, sigma=2.5)
+
+    # Identify slab atoms: the bottom portion by z-coordinate
+    # Heuristic: atoms below the median z are "slab" and get fixed
+    z_values = relaxed.positions[:, 2]
+    z_median = np.median(z_values)
+    slab_indices = [i for i, z in enumerate(z_values) if z < z_median]
+
+    if slab_indices:
+        relaxed.constraints = [FixAtoms(indices=slab_indices)]
+
+    print(f"  Relaxing {len(relaxed) - len(slab_indices)} electrolyte atoms "
+          f"({len(slab_indices)} slab atoms fixed)...")
+    dyn = BFGS(relaxed, logfile=None)
+    dyn.run(fmax=fmax, steps=steps)
+    final_fmax = float(np.max(np.abs(relaxed.get_forces())))
+    print(f"  Relaxation done in {dyn.nsteps} steps, final max force: {final_fmax:.4f} eV/A")
+    return relaxed
+
+
 def parse_lammps_data(data_path: str) -> tuple:
     """Parse LAMMPS data file and return (symbols, positions, cell, mol_ids).
 
@@ -1036,29 +1344,240 @@ def parse_lammps_data(data_path: str) -> tuple:
     return symbols, positions, cell, mol_ids
 
 
+# ─── Element sorting & distance helpers ──────────────────────────────
+
+# Preferred order for POSCAR grouping: metals, then main-group, then H
+_ELEMENT_PRIORITY = {
+    'Pt': 0, 'Pd': 1, 'Au': 2, 'Ag': 3, 'Cu': 4, 'Ni': 5, 'Co': 6,
+    'Fe': 7, 'Mo': 8, 'W': 9, 'Ti': 10, 'Zr': 11, 'Al': 12, 'Si': 13,
+    'P': 14, 'S': 15, 'Cl': 16, 'Na': 17, 'K': 18, 'Ca': 19, 'Mg': 20,
+    'Li': 21, 'Cs': 22, 'Br': 23, 'F': 24, 'I': 25, 'C': 26, 'N': 27,
+    'O': 28, 'H': 29,
+}
+
+
+def _group_by_symbol(atoms: Atoms) -> Atoms:
+    """Sort atoms by element for proper POSCAR grouping.
+
+    Metals first, then main-group, then H.  Within each group the original
+    order is preserved.
+    """
+    symbols = atoms.get_chemical_symbols()
+    sort_indices = sorted(range(len(symbols)),
+                         key=lambda i: _ELEMENT_PRIORITY.get(symbols[i], 100))
+    return atoms[sort_indices]
+
+
+def min_distance(atoms: Atoms) -> float:
+    """Return the minimum inter-atomic pair distance (Angstrom, MIC)."""
+    if len(atoms) < 2:
+        return 0.0
+    distances = atoms.get_all_distances(mic=True)
+    # Zero out diagonal
+    np.fill_diagonal(distances, np.inf)
+    return float(np.min(distances))
+
+
+# ─── Report & metadata ──────────────────────────────────────────────
+
+def _plain_metadata(value):
+    """Convert numpy types to plain Python for JSON-safe reports."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _plain_metadata(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_plain_metadata(v) for v in value)
+    if isinstance(value, list):
+        return [_plain_metadata(v) for v in value]
+    return value
+
+
+def _report(atoms: Atoms, metadata: dict) -> str:
+    """Generate a human-readable model_report.txt."""
+    from collections import Counter
+    lines = ["DFTbuild model report"]
+    for key, value in (metadata or {}).items():
+        lines.append(f"{key}: {_plain_metadata(value)}")
+    counts = Counter(atoms.get_chemical_symbols())
+    lines.append(f"formula: {atoms.get_chemical_formula()}")
+    lines.append("element_counts: " + ", ".join(
+        f"{k}={counts[k]}" for k in sorted(counts)))
+    lengths = atoms.cell.lengths()
+    lines.append(f"cell_lengths_angstrom: {lengths[0]:.4f}, "
+                 f"{lengths[1]:.4f}, {lengths[2]:.4f}")
+    md = min_distance(atoms)
+    lines.append(f"min_distance_angstrom: {md:.4f}")
+    lines.append("warnings: " +
+                 ("close_contacts_below_0.7A" if md < 0.7 else "none"))
+    return "\n".join(lines) + "\n"
+
+
+# ─── Model output ───────────────────────────────────────────────────
+
+def write_model_package(atoms: Atoms, output_dir: str,
+                        metadata: dict | None = None) -> dict:
+    """Write POSCAR, XYZ, CIF, LAMMPS data, and model_report.txt.
+
+    Returns a dict of paths for logging.
+    """
+    from ase.io import write as ase_write
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    grouped = _group_by_symbol(atoms)
+
+    poscar = out / "POSCAR"
+    xyz = out / "structure.xyz"
+    cif = out / "structure.cif"
+    data = out / "structure.data"
+    report = out / "model_report.txt"
+
+    ase_write(str(poscar), grouped, format='vasp', vasp5=True)
+    ase_write(str(xyz), grouped, format='xyz')
+    ase_write(str(cif), grouped, format='cif')
+    ase_write(str(data), grouped, format='lammps-data')
+    report.write_text(_report(grouped, metadata or {}), encoding='utf-8')
+
+    paths = {
+        'POSCAR': str(poscar),
+        'XYZ': str(xyz),
+        'CIF': str(cif),
+        'LAMMPS': str(data),
+        'report': str(report),
+    }
+    for label, p in paths.items():
+        print(f"  {label:8s}: {p}")
+    return paths
+
+
+# ─── Main build pipeline ────────────────────────────────────────────
+
+def _build_surface(surface_cfg: dict) -> Atoms:
+    """Dispatch surface construction based on config type."""
+    stype = surface_cfg.get('type', 'slab')
+
+    if stype == 'nanotube':
+        atoms = build_nanotube(
+            surface_cfg['n'], surface_cfg['m'],
+            surface_cfg.get('length', 3),
+            surface_cfg.get('vacuum', 15.0))
+    elif stype == 'heterojunction':
+        film_cfg = surface_cfg.get('film')
+        sub_cfg = surface_cfg.get('substrate')
+        if film_cfg and sub_cfg:
+            atoms = build_heterojunction_pymatgen(
+                film_cfg, sub_cfg, surface_cfg.get('vacuum', 15.0))
+        else:
+            raise ValueError(
+                "Heterojunction config requires 'film' and 'substrate' keys")
+    elif stype == 'slab':
+        atoms = build_slab(
+            surface_cfg['element'],
+            tuple(surface_cfg['miller']),
+            tuple(surface_cfg['size']),
+            surface_cfg['layers'],
+            surface_cfg.get('vacuum', 15.0))
+    else:
+        raise ValueError(f"Unknown surface type: {stype!r}")
+
+    atoms.pbc = True
+    return atoms
+
+
+def build(config_path: str) -> dict:
+    """Main build pipeline.
+
+    Steps:
+      1. Build surface (slab / nanotube / heterojunction)
+      2. Alloy substitution (optional)
+      3. Add adsorbates (optional)
+      4. Build electrolyte with Packmol (optional)
+      5. LJ relaxation to remove close contacts (optional)
+      6. Write output package (POSCAR / XYZ / CIF / LAMMPS data / report)
+
+    Returns dict of output file paths.
+    """
+    config = load_config(config_path)
+    output_dir = config['output_dir']
+    os.makedirs(output_dir, exist_ok=True)
+
+    metadata = {'config': os.path.basename(config_path)}
+
+    # ── Step 1: Surface ──────────────────────────────────────────────
+    surface_cfg = config.get('surface', {})
+    if not surface_cfg:
+        raise ValueError("Config must contain a 'surface' section")
+    print("[1/6] Building surface...")
+    atoms = _build_surface(surface_cfg)
+    print(f"  {len(atoms)} atoms, formula {atoms.get_chemical_formula()}")
+
+    # ── Step 2: Alloy ────────────────────────────────────────────────
+    alloy_cfg = config.get('alloy')
+    if alloy_cfg:
+        print("[2/6] Applying alloy substitution...")
+        symbols = alloy_cfg.get('symbols', [])
+        top_layers = alloy_cfg.get('top_layers', 1)
+        fractions = alloy_cfg.get('fractions')
+        if fractions:
+            fractions = {k: float(v) for k, v in fractions.items()}
+        atoms, changed = alloy_surface_layers(
+            atoms, symbols, top_layers=top_layers, fractions=fractions)
+        print(f"  Alloyed: {changed}")
+    else:
+        print("[2/6] No alloy specified, skipping...")
+
+    # ── Step 3: Adsorbates ───────────────────────────────────────────
+    ads_cfg = config.get('adsorbate', {})
+    ads_list = ads_cfg.get('list', [])
+    if ads_list:
+        print("[3/6] Adding adsorbates...")
+        atoms, ads_meta = add_adsorbates(atoms, ads_list)
+        metadata['adsorbates'] = ads_meta
+        print(f"  {len(atoms)} atoms after adsorbate placement")
+    else:
+        print("[3/6] No adsorbates specified, skipping...")
+
+    # ── Step 4: Electrolyte (Packmol) ────────────────────────────────
+    elec_cfg = config.get('electrolyte', {})
+    has_electrolyte = bool(
+        elec_cfg.get('water_count', 0) > 0 or
+        elec_cfg.get('ions') or
+        elec_cfg.get('solvents') or
+        elec_cfg.get('ethanol_count', 0) > 0)
+
+    if has_electrolyte:
+        print("[4/6] Building electrolyte with Packmol...")
+        atoms = build_electrolyte_packmol(atoms, elec_cfg, output_dir)
+        metadata['electrolyte'] = {
+            k: v for k, v in elec_cfg.items()
+            if k not in ('relax_steps',)
+        }
+    else:
+        print("[4/6] No electrolyte specified, skipping...")
+
+    # ── Step 5: LJ relaxation ────────────────────────────────────────
+    relax_steps = elec_cfg.get('relax_steps', 1000)
+    if has_electrolyte and relax_steps > 0:
+        print("[5/6] Running LJ relaxation...")
+        atoms = relax_structure(atoms, steps=relax_steps)
+        metadata['relax_steps'] = relax_steps
+    else:
+        print("[5/6] No relaxation needed, skipping...")
+
+    # ── Step 6: Output ───────────────────────────────────────────────
+    print("[6/6] Writing output files...")
+    paths = write_model_package(atoms, output_dir, metadata=metadata)
+    print("\nDone!")
+    return paths
+
+
 # ─── CLI entry point ────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python build.py <config.json> [command]")
-        print("Commands: config, structure, lattice")
+    if len(sys.argv) != 2:
+        print("Usage: python scripts/build.py <config.json>")
         sys.exit(1)
-
-    config_path = sys.argv[1]
-    command = sys.argv[2] if len(sys.argv) > 2 else 'config'
-
-    if command == 'config':
-        config = load_config(config_path)
-        print(json.dumps(config, indent=2))
-    elif command == 'structure':
-        source = sys.argv[3] if len(sys.argv) > 3 else 'Pt:fcc:3.92'
-        struct = _get_structure(source)
-        print(f"Formula: {struct.composition.reduced_formula}")
-        print(f"Periodicity: {struct.lattice}")
-        print(f"Species: {[str(s) for s in struct.species]}")
-    elif command == 'lattice':
-        print(json.dumps(LATTICE, indent=2))
-    else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
+    build(sys.argv[1])
