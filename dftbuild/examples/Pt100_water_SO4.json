@@ -1,0 +1,22 @@
+{
+  "_comment": "Pt(100) 3x3 4-layer slab + 50 H2O + 1 SO4(2-) + 2 Na+ (charge-balanced)",
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "electrolyte": {
+    "water_count": 50,
+    "ions": {
+      "Na+": 2,
+      "SO4(2-)": 1
+    },
+    "tolerance": 2.0,
+    "seed": 1234,
+    "relax_steps": 1000
+  },
+  "output_dir": "Pt100_water_SO4"
+}

@@ -1,0 +1,27 @@
+{
+  "_comment": "Pt(100) 3x3 4-layer slab + 50 H2O + 2 Na+ + 2 Cl- + 1 NH3 adsorbate",
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "NH3", "site": "ontop", "height": 2.0}
+    ]
+  },
+  "electrolyte": {
+    "water_count": 50,
+    "ions": {
+      "Na+": 2,
+      "Cl-": 2
+    },
+    "tolerance": 2.0,
+    "seed": 42,
+    "relax_steps": 1000
+  },
+  "output_dir": "Pt100_water_NaCl"
+}

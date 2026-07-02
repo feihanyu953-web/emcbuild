@@ -1,0 +1,25 @@
+{
+  "_comment": "Pt(100) 3x3 4-layer slab + 30 H2O + 10 ETOH (ethanol) + 1 Na+ + 1 Cl-",
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "electrolyte": {
+    "water_count": 30,
+    "solvents": {
+      "ETOH": 10
+    },
+    "ions": {
+      "Na+": 1,
+      "Cl-": 1
+    },
+    "tolerance": 2.0,
+    "seed": 4321,
+    "relax_steps": 1000
+  },
+  "output_dir": "Pt100_organic_solvent"
+}
