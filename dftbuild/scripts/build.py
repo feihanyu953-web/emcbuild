@@ -20,6 +20,7 @@ from typing import Mapping, Sequence
 import numpy as np
 from ase import Atoms
 from ase.build import (
+    add_adsorbate as ase_add_adsorbate,
     bcc100,
     bcc110,
     bcc111,
@@ -28,9 +29,12 @@ from ase.build import (
     fcc110,
     fcc111,
     hcp0001,
+    molecule as ase_molecule,
     nanotube,
     surface,
 )
+from ase.geometry import get_distances
+from ase.io import read as ase_read
 
 # ─── Path configuration ──────────────────────────────────────────────
 SKILL_ROOT = Path(__file__).parent.parent
@@ -508,6 +512,350 @@ def alloy_surface_layers(atoms: Atoms, symbols: Sequence[str],
         changed[sym] = count
         cursor += count
     return alloyed, changed
+
+
+# ─── Molecule building ─────────────────────────────────────────────
+
+# Hardcoded fallback geometries for common adsorbates (symbols + positions)
+FALLBACK_GEOMETRIES = {
+    "H":  ("H",  [(0.0, 0.0, 0.0)]),
+    "O":  ("O",  [(0.0, 0.0, 0.0)]),
+    "N":  ("N",  [(0.0, 0.0, 0.0)]),
+    "OH": ("OH", [(0.0, 0.0, 0.0), (0.0, 0.0, 0.97)]),
+    "NH": ("NH", [(0.0, 0.0, 0.0), (0.0, 0.0, 1.02)]),
+    "NH2": ("NH2", [(0.0, 0.0, 0.0), (0.92, 0.0, 0.55), (-0.92, 0.0, 0.55)]),
+    "NH3": (
+        "NH3",
+        [(0.0, 0.0, 0.0), (0.94, 0.0, 0.45),
+         (-0.47, 0.81, 0.45), (-0.47, -0.81, 0.45)],
+    ),
+    "H2O": ("OH2", [(0.0, 0.0, 0.0), (0.76, 0.58, 0.0), (-0.76, 0.58, 0.0)]),
+}
+
+ION_GEOMETRIES = {
+    "K":   ("K",   [(0.0, 0.0, 0.0)]),
+    "K+":  ("K",   [(0.0, 0.0, 0.0)]),
+    "Na":  ("Na",  [(0.0, 0.0, 0.0)]),
+    "Na+": ("Na",  [(0.0, 0.0, 0.0)]),
+    "Cl":  ("Cl",  [(0.0, 0.0, 0.0)]),
+    "Cl-": ("Cl",  [(0.0, 0.0, 0.0)]),
+    "OH":  FALLBACK_GEOMETRIES["OH"],
+    "OH-": FALLBACK_GEOMETRIES["OH"],
+    "NH3": FALLBACK_GEOMETRIES["NH3"],
+}
+
+MOLECULE_ALIASES = {
+    "K+":  "K",
+    "Na+": "Na",
+    "Cl-": "Cl",
+    "OH-": "OH",
+}
+
+SURFACE_ANCHOR_SYMBOLS = {
+    "CO": "C",
+}
+
+
+def build_molecule(name: str) -> tuple:
+    """Build a molecule from file, SMILES/RDKit, ASE collection, or hardcoded fallback.
+
+    Priority:
+      1. ``file:/path/to/xyz`` — read user-supplied file
+      2. ``smiles:CCO``       — RDKit 3D conformer
+      3. ASE built-in molecule library
+      4. Hardcoded fallback geometry
+
+    Returns (Atoms, source_label) where source_label is one of
+    'file', 'rdkit', 'ase', 'fallback'.
+    """
+    if name.startswith("file:"):
+        from pathlib import Path as _P
+        atoms = ase_read(_P(name.removeprefix("file:")))
+        atoms.translate(-atoms.positions[0])
+        return atoms, "file"
+
+    if name.startswith("smiles:"):
+        atoms = _rdkit_molecule_from_smiles(name.removeprefix("smiles:"))
+        atoms.translate(-atoms.positions[0])
+        return atoms, "rdkit"
+
+    canonical_name = MOLECULE_ALIASES.get(name, name)
+    try:
+        atoms = ase_molecule(canonical_name)
+        atoms = _surface_oriented_molecule(name, atoms)
+        atoms.translate(-atoms.positions[0])
+        return atoms, "ase"
+    except Exception:
+        pass
+
+    geometry = ION_GEOMETRIES.get(name, FALLBACK_GEOMETRIES.get(name))
+    if geometry is None:
+        raise ValueError(f"Unsupported molecule {name!r}")
+    formula, positions = geometry
+    return Atoms(formula, positions=positions), "fallback"
+
+
+def _surface_oriented_molecule(name: str, atoms: Atoms) -> Atoms:
+    """Orient molecule so the anchor atom is at the bottom (closest to surface)."""
+    anchor_symbol = SURFACE_ANCHOR_SYMBOLS.get(name)
+    if anchor_symbol is None:
+        return atoms
+
+    symbols = atoms.get_chemical_symbols()
+    try:
+        anchor_index = symbols.index(anchor_symbol)
+    except ValueError:
+        return atoms
+
+    order = [anchor_index] + [idx for idx in range(len(atoms)) if idx != anchor_index]
+    oriented = atoms[order]
+    oriented.translate(-oriented.positions[0])
+    if len(oriented) > 1 and float(np.mean(oriented.positions[1:, 2])) < 0.0:
+        oriented.positions[:, 2] *= -1.0
+    return oriented
+
+
+def _rdkit_molecule_from_smiles(smiles: str) -> Atoms:
+    """Generate a 3D molecular structure from a SMILES string using RDKit."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError as exc:
+        raise RuntimeError(
+            "RDKit is required for smiles: molecule generation. "
+            "Install with: conda install -c conda-forge rdkit"
+        ) from exc
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"RDKit could not parse SMILES {smiles!r}")
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.randomSeed = 20260520
+    if AllChem.EmbedMolecule(mol, params) != 0:
+        raise ValueError(f"RDKit could not embed a 3D conformer for SMILES {smiles!r}")
+    try:
+        AllChem.MMFFOptimizeMolecule(mol)
+    except Exception:
+        AllChem.UFFOptimizeMolecule(mol)
+    conf = mol.GetConformer()
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    positions = [
+        (conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y, conf.GetAtomPosition(i).z)
+        for i in range(mol.GetNumAtoms())
+    ]
+    return Atoms(symbols, positions=positions)
+
+
+def _molecule_from_geometry(name: str, anchor: tuple) -> Atoms:
+    """Build molecule and translate its first atom to *anchor* position."""
+    atoms, _ = build_molecule(name)
+    atoms.translate(anchor)
+    return atoms
+
+
+# ─── Adsorbate placement ──────────────────────────────────────────
+
+def add_adsorbate(atoms: Atoms, adsorbate: str, site: str = "ontop",
+                  height: float = 1.8, xy: tuple = None) -> Atoms:
+    """Add a single adsorbate molecule above the top surface.
+
+    Parameters
+    ----------
+    atoms : Atoms
+        Base slab.
+    adsorbate : str
+        Molecule name (e.g. "NH3", "CO", "smiles:CCO").
+    site : str
+        ASE site name ("ontop", "bridge", "hollow", "fcc", "hcp")
+        or "custom_xyz" when *xy* is provided.
+    height : float
+        Vertical distance (Angstrom) above the surface site.
+    xy : tuple of float, optional
+        Explicit (x, y) placement; overrides *site*.
+
+    Returns
+    -------
+    Atoms
+        Slab with adsorbate added.
+    """
+    base = atoms.copy()
+    adsorbate_atoms, _ = build_molecule(adsorbate)
+    position = xy if site == "custom_xyz" else _ase_site_name(site, base)
+    ase_add_adsorbate(base, adsorbate_atoms, height=height, position=position)
+    base.center(axis=2, vacuum=12.0)
+    return base
+
+
+def add_adsorbates(atoms: Atoms, specs: Sequence,
+                   min_site_distance: float = 1.5) -> tuple:
+    """Add multiple adsorbates with automatic site-spacing for co-adsorption.
+
+    The first adsorbate is placed as specified.  Subsequent adsorbates whose
+    ``site`` matches a known ASE site name automatically search candidate
+    positions and pick the one that maximises the minimum distance to
+    already-placed adsorbate atoms.
+
+    Parameters
+    ----------
+    atoms : Atoms
+        Base slab.
+    specs : list of dict
+        Each dict keys: ``name`` (str), ``site`` (str, default "ontop"),
+        ``height`` (float, default 1.8), and optionally ``xy`` ([x, y]).
+    min_site_distance : float
+        Warning threshold (Angstrom) for inter-adsorbate distance.
+
+    Returns
+    -------
+    model : Atoms
+        Slab with all adsorbates placed.
+    metadata : list of dict
+        Per-adsorbate placement record.
+    """
+    if not specs:
+        return atoms.copy(), []
+
+    model = atoms.copy()
+    result_meta: list = []
+    adsorbate_indices: set = set()
+
+    for idx, spec in enumerate(specs):
+        name = str(spec["name"])
+        site = str(spec.get("site", "ontop"))
+        height = float(spec.get("height", 1.8))
+        xy_spec = spec.get("xy")
+        xy = (float(xy_spec[0]), float(xy_spec[1])) if xy_spec is not None else None
+
+        if idx == 0:
+            n_before = len(model)
+            model = add_adsorbate(model, name, site=site, height=height, xy=xy)
+            adsorbate_indices = set(range(n_before, len(model)))
+            result_meta.append({
+                "name": name, "site": site, "height": height,
+                "placement": "custom_xy" if xy is not None else "direct",
+            })
+            continue
+
+        # --- subsequent adsorbate: evaluate candidate sites ---
+        mol_atoms, _ = build_molecule(name)
+        mol_positions = mol_atoms.positions.copy()
+        site_info = model.info.get("adsorbate_info", {}).get("sites", {})
+        existing_pos = model.positions[sorted(adsorbate_indices)]
+
+        if xy is not None:
+            chosen_xy = xy
+            placement_note = f"custom_xy ({xy[0]:.3f}, {xy[1]:.3f})"
+        elif site in site_info:
+            candidate_xy_list, surf_z = _expand_site_positions(model, site, height)
+            best_xy = None
+            best_min_dist = -1.0
+            for cx, cy in candidate_xy_list:
+                candidate_positions = mol_positions + np.array([cx, cy, surf_z + height])
+                _, dists = get_distances(
+                    candidate_positions, existing_pos,
+                    cell=model.cell, pbc=model.pbc,
+                )
+                min_d = float(np.min(dists))
+                if min_d > best_min_dist:
+                    best_min_dist = min_d
+                    best_xy = (cx, cy)
+            chosen_xy = best_xy
+            placement_note = (
+                f"auto ({len(candidate_xy_list)} {site} candidates, "
+                f"best min dist {best_min_dist:.3f} A)"
+            )
+        else:
+            chosen_xy = None
+            placement_note = f"ase_default ({site})"
+
+        n_before = len(model)
+        if chosen_xy is not None:
+            model = add_adsorbate(model, name, site="custom_xyz",
+                                  height=height, xy=chosen_xy)
+        else:
+            model = add_adsorbate(model, name, site=site, height=height, xy=None)
+
+        new_indices = set(range(n_before, len(model)))
+
+        # --- distance check ---
+        actual_min = float("inf")
+        if adsorbate_indices and new_indices:
+            for i in new_indices:
+                for j in adsorbate_indices:
+                    actual_min = min(actual_min,
+                                     model.get_distance(i, j, mic=True))
+        actual_min = float(actual_min)
+
+        meta = {
+            "name": name, "site": site, "height": height,
+            "placement": placement_note,
+            "min_inter_adsorbate_distance_A": float(round(actual_min, 3)),
+        }
+        if actual_min < min_site_distance:
+            meta["warning"] = (
+                f"inter-adsorbate distance {actual_min:.2f} A "
+                f"below threshold {min_site_distance} A"
+            )
+
+        result_meta.append(meta)
+        adsorbate_indices |= new_indices
+
+    return model, result_meta
+
+
+def _expand_site_positions(atoms: Atoms, site_name: str,
+                           height: float) -> tuple:
+    """Expand fractional site coordinates across the supercell.
+
+    ASE stores site positions as fractional coordinates inside the
+    primitive surface cell together with the primitive cell vectors.
+    This helper enumerates every supercell image that fits within the
+    slab's xy cell and returns the Cartesian (x, y) of each together
+    with the surface z coordinate used for vertical placement.
+
+    Returns
+    -------
+    positions : list of (x, y) tuples
+    surf_z : float
+    """
+    info = atoms.info.get("adsorbate_info", {})
+    site_frac = np.array(info["sites"][site_name], dtype=float)
+    prim_cell = np.array(info["cell"], dtype=float)  # 2x2
+
+    slab_cell_2d = atoms.cell[:2, :2]
+    try:
+        rep_matrix = slab_cell_2d @ np.linalg.inv(prim_cell)
+    except np.linalg.LinAlgError:
+        return [], 0.0
+    nx = max(1, int(round(abs(rep_matrix[0, 0]))))
+    ny = max(1, int(round(abs(rep_matrix[1, 1]))))
+
+    positions = []
+    for i in range(nx):
+        for j in range(ny):
+            spos = site_frac + np.array([float(i), float(j)])
+            xy = np.dot(spos, prim_cell)
+            positions.append((float(xy[0]), float(xy[1])))
+
+    top_idx = info.get("top layer atom index", None)
+    if top_idx is not None:
+        surf_z = float(atoms.positions[int(top_idx), 2])
+    else:
+        surf_z = float(max(atoms.positions[:, 2]))
+
+    return positions, surf_z
+
+
+def _ase_site_name(site: str, atoms: Atoms) -> str:
+    """Validate an ASE surface site name against what the slab knows."""
+    valid = {"ontop", "bridge", "hollow", "fcc", "hcp", "longbridge", "shortbridge"}
+    if site in valid:
+        return site
+    if site == "custom_xyz":
+        raise ValueError("custom_xyz placement requires xy coordinates")
+    available = sorted((atoms.info.get("adsorbate_info") or {}).get("sites", {}))
+    raise ValueError(f"Unsupported site {site!r}. ASE-known sites for this slab: {available}")
 
 
 # ─── LAMMPS data support ────────────────────────────────────────────
