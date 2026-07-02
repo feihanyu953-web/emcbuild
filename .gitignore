@@ -1,0 +1,9 @@
+# Output files
+outputs/
+__pycache__/
+*.pyc
+
+# EMC generated files
+*.emc.gz
+*.pdb.gz
+*.psf.gz
