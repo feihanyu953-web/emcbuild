@@ -441,15 +441,82 @@ def build_heterojunction_pymatgen(film_cfg: dict, substrate_cfg: dict,
     return atoms
 
 
-def build_molecule(name, smiles=None, builder=None, output_dir=None):
+def build_molecule_rdkit(name, smiles=None, n_conformers=50):
+    """Build a 3D molecule from SMILES with RDKit (ETKDGv3 + MMFF94).
+
+    Fallback path when EMC/PCFF cannot type the molecule (missing force
+    field parameters). RDKit is an optional dependency — install with
+    ``pip install rdkit``.
+
+    Generates ``n_conformers`` MMFF94-optimized conformers and returns
+    the lowest-energy one.
+
+    Args:
+        name: Molecule name (for messages)
+        smiles: SMILES string
+        n_conformers: Number of ETKDGv3 conformers to sample (default 50)
+
+    Returns:
+        ASE Atoms with optimized 3D geometry (pbc=False)
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError:
+        raise RuntimeError(
+            f"RDKit not installed — required for fallback builder of "
+            f"'{name}'. Install with: pip install rdkit"
+        )
+    if not smiles:
+        raise ValueError(f"SMILES required for RDKit builder ('{name}')")
+
+    base = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    if base is None:
+        raise ValueError(f"Invalid SMILES: {smiles}")
+
+    params = AllChem.ETKDGv3()
+    params.numThreads = 0
+    best_mol, best_e = None, float("inf")
+    for i in range(n_conformers):
+        trial = Chem.Mol(base)
+        params.randomSeed = 0xC0FFEE + i
+        try:
+            if AllChem.EmbedMolecule(trial, params) != 0:
+                continue
+            AllChem.MMFFOptimizeMolecule(trial, maxIters=2000)
+            props = AllChem.MMFFGetMoleculeProperties(trial, mmffVariant='MMFF94')
+            ff = AllChem.MMFFGetMoleculeForceField(trial, props)
+            energy = ff.CalcEnergy()
+            if energy < best_e:
+                best_e, best_mol = energy, trial
+        except Exception:
+            continue
+    if best_mol is None:
+        raise RuntimeError(f"RDKit failed to generate a conformer for '{name}'")
+
+    conf = best_mol.GetConformer()
+    symbols = [a.GetSymbol() for a in best_mol.GetAtoms()]
+    positions = np.array([list(conf.GetAtomPosition(a.GetIdx()))
+                          for a in best_mol.GetAtoms()])
+    mol_atoms = Atoms(symbols=symbols, positions=positions)
+    mol_atoms.pbc = False
+    print(f"  Built '{name}' with RDKit MMFF94 ({n_conformers} conformers): "
+          f"{len(mol_atoms)} atoms, energy {best_e:.2f} kcal/mol")
+    return mol_atoms
+
+
+def build_molecule(name, smiles=None, builder=None, output_dir=None,
+                   n_conformers=50):
     """Build a molecule from SMILES or name.
 
     Priority:
     1. File path: file:xxx
-    2. EMC/PCFF builder (builder="emc") — for complex organics
-    3. SMILES string via ASE
-    4. ASE built-in molecule library
-    5. Hardcoded fallback for common molecules
+    2. EMC/PCFF builder (builder="emc") — for complex organics,
+       auto-falls back to RDKit MMFF94 when EMC cannot type the molecule
+    3. RDKit builder (builder="rdkit") — ETKDGv3 + MMFF94 directly
+    4. SMILES string via ASE → RDKit
+    5. ASE built-in molecule library
+    6. Hardcoded fallback for common molecules
     """
     # 1. File path
     if name.startswith('file:'):
@@ -467,18 +534,32 @@ def build_molecule(name, smiles=None, builder=None, output_dir=None):
         if not output_dir:
             import tempfile
             output_dir = tempfile.mkdtemp(prefix='emcbuild_molecule_')
-        return build_molecule_emc(name, smiles, output_dir)
+        try:
+            return build_molecule_emc(name, smiles, output_dir)
+        except Exception as e:
+            print(f"  EMC/PCFF failed for '{name}': {e}")
+            print(f"  Falling back to RDKit MMFF94...")
+            return build_molecule_rdkit(name, smiles, n_conformers)
 
-    # Method 3: Use SMILES if provided
+    # 3. Explicit RDKit builder
+    if builder == 'rdkit':
+        return build_molecule_rdkit(name, smiles, n_conformers)
+
+    # Method 4: Use SMILES if provided
     if smiles:
         try:
             mol = molecule(smiles)
             print(f"  Built '{name}' from SMILES: {smiles}")
             return mol
         except Exception as e:
-            print(f"  Warning: SMILES '{smiles}' failed: {e}, falling back...")
+            print(f"  Warning: SMILES '{smiles}' failed: {e}, "
+                  f"trying RDKit...")
+            try:
+                return build_molecule_rdkit(name, smiles, n_conformers)
+            except Exception:
+                pass
 
-    # Method 2: Try ASE built-in molecule library
+    # Method 5: Try ASE built-in molecule library
     try:
         mol = molecule(name)
         print(f"  Built '{name}' from ASE built-in library")
@@ -486,7 +567,7 @@ def build_molecule(name, smiles=None, builder=None, output_dir=None):
     except Exception:
         pass
 
-    # Method 3: Hardcoded fallback for common molecules
+    # Method 6: Hardcoded fallback for common molecules
     molecules = {
         'NH3': Atoms('NH3', positions=[[0,0,0],[0.94,0,0.45],[-0.47,0.81,0.45],[-0.47,-0.81,0.45]]),
         'H2O': Atoms('OH2', positions=[[0,0,0],[0.76,0.58,0],[-0.76,0.58,0]]),

@@ -309,10 +309,13 @@ Mass fractions are automatically calculated. Explicit user counts are used in EM
 |---|---|---|
 | SMILES (ASE) | `"smiles": "[NH3]"` | Simple molecules, ASE handles it |
 | ASE built-in | `"name": "NH3"` | ASE molecule library |
-| **EMC/PCFF** | `"builder": "emc"` | **Complex organics** (multi-rotatable bonds, fluoro-ethers, ionic liquids). Uses EMC+PCFF for high-quality 3D conformer generation |
-| Auto | `"name": "CO2"` | Tries SMILES first, falls back to ASE |
+| **EMC/PCFF** | `"builder": "emc"` | **Complex organics** (multi-rotatable bonds, fluoro-ethers, ionic liquids). Uses EMC+PCFF for high-quality 3D conformer generation. **Auto-falls back to RDKit MMFF94 when EMC cannot type the molecule** (missing force-field parameters) |
+| **RDKit** | `"builder": "rdkit"` | ETKDGv3 + MMFF94 multi-conformer screening (50 conformers, lowest energy). Use when EMC force fields lack rules (amides, heterocycles, sugars, carboxylates). Requires `rdkit` (optional dependency) |
+| Auto | `"name": "CO2"` | Tries SMILES first, falls back to RDKit, then ASE library |
 
 > **When to use `builder: "emc"`**: For molecules with >5 heavy atoms, multiple rotatable bonds, or fluorine-substituted backbones (e.g., TTE/HFE, ionic liquid cations, long-chain solvents). Simple inorganics (CO₂, NH₃, COOH, N₂H₄) are better with ASE.
+>
+> **When to use `builder: "rdkit"`**: When EMC/PCFF fails with `Missing force field parameters` (e.g., pyrrolidone amides, glucopyranose rings, carboxymethyl ethers). RDKit preserves SMILES stereo-chemistry (`@` markers), which EMC's SMILES parser may ignore. Since `builder: "emc"` auto-falls back to RDKit, explicit `"builder": "rdkit"` is only needed to skip the EMC attempt.
 
 ### Heterojunction Config (pymatgen)
 
