@@ -1,0 +1,31 @@
+{
+  "surface": {
+    "type": "heterojunction",
+    "film": {
+      "source": "mp-20194",
+      "miller": [1, 1, 1],
+      "thickness": 3
+    },
+    "substrate": {
+      "source": "mp-126",
+      "miller": [1, 0, 0],
+      "thickness": 4
+    },
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "NH3", "element": "Pt", "site": "ontop", "height": 2.0}
+    ]
+  },
+  "electrolyte": {
+    "water_count": 30,
+    "ions": {"Na+": 1, "OH-": 1},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm",
+    "gap": 1.5,
+    "min_clearance": 1.5
+  },
+  "output_dir": "outputs/ceo2_pt100_heterojunction"
+}

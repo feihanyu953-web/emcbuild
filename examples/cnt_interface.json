@@ -1,0 +1,26 @@
+{
+  "type": "nanotube",
+  "surface": {
+    "source": "emc",
+    "type": "nanotube",
+    "n": 5,
+    "m": 5,
+    "length": 3,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "source": "ase",
+    "list": [
+      {"name": "NH3", "site": "ontop", "height": 2.0}
+    ]
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 30,
+    "ions": {"Na+": 1, "OH-": 1},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "pcff"
+  },
+  "output_dir": "outputs/cnt_interface"
+}

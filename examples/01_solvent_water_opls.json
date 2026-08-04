@@ -1,0 +1,11 @@
+{
+  "type": "surface",
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 500,
+    "density": 1.0,
+    "temperature": 300,
+    "field": "opls"
+  },
+  "output_dir": "examples/outputs/01_solvent_water_opls"
+}

@@ -1,0 +1,29 @@
+{
+  "fcc": {
+    "elements": ["Ag", "Au", "Cu", "Ni", "Pd", "Pt"],
+    "miller_indices": [[1, 0, 0], [1, 1, 0], [1, 1, 1]],
+    "library": "fcc.emc"
+  },
+  "bcc": {
+    "elements": ["Fe", "W", "Mo"],
+    "miller_indices": [[1, 0, 0], [1, 1, 0], [1, 1, 1]],
+    "library": "bcc.emc"
+  },
+  "hcp": {
+    "elements": ["Co", "Ti", "Zn"],
+    "miller_indices": [[0, 0, 0, 1]],
+    "library": "hcp.emc"
+  },
+  "oxide": {
+    "CeO2": {
+      "miller_indices": [[1, 1, 1], [1, 1, 0], [1, 0, 0]],
+      "library": "ceo2.emc"
+    }
+  },
+  "nanotube": {
+    "library": "nanotube.emc"
+  },
+  "fullerene": {
+    "library": "fullerene.emc"
+  }
+}

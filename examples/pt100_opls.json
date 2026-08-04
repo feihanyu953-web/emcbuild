@@ -1,0 +1,24 @@
+{
+  "type": "interface",
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "NH3", "site": "ontop", "height": 2.0}
+    ]
+  },
+  "electrolyte": {
+    "water_count": 30,
+    "ions": {"Na+": 1, "OH-": 1},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "opls"
+  },
+  "output_dir": "outputs/pt100_opls"
+}

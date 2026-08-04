@@ -1,0 +1,24 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "emc",
+    "element": "Pt",
+    "miller": [1, 1, 1],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "source": "ase",
+    "list": []
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 30,
+    "ions": {},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "pcff"
+  },
+  "output_dir": "outputs/default"
+}

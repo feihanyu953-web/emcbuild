@@ -1,0 +1,14 @@
+{
+  "surface": {
+    "type": "nanotube",
+    "n": 5,
+    "m": 5,
+    "length": 3,
+    "vacuum": 15.0
+  },
+  "doping": {
+    "Fe": 4,
+    "N": 8
+  },
+  "output_dir": "outputs/cnt_fen_doped"
+}

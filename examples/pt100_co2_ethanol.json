@@ -1,0 +1,25 @@
+{
+  "surface": {
+    "type": "slab",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [3, 3],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "CO", "site": "ontop", "height": 1.8}
+    ]
+  },
+  "electrolyte": {
+    "water_count": 30,
+    "ions": {"K+": 1, "OH-": 1},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm",
+    "gap": 1.5,
+    "min_clearance": 1.5
+  },
+  "output_dir": "outputs/pt100_co2_ethanol"
+}

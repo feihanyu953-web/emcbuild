@@ -1,0 +1,21 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "ase",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [6, 6],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 150,
+    "solvents": {"DMSO": 30},
+    "ions": {"K+": 5, "Cl-": 5},
+    "density": 1.1,
+    "temperature": 300,
+    "field": "opls"
+  },
+  "output_dir": "examples/outputs/04_pt100_mixed_opls"
+}

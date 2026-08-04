@@ -1,0 +1,31 @@
+{
+  "surface": {
+    "type": "heterojunction",
+    "film": {
+      "source": "mp-390",
+      "miller": [1, 0, 1],
+      "thickness": 3
+    },
+    "substrate": {
+      "source": "mp-126",
+      "miller": [1, 0, 0],
+      "thickness": 4
+    },
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "NH3", "element": "Pt", "site": "ontop", "height": 2.0}
+    ]
+  },
+  "electrolyte": {
+    "water_count": 200,
+    "ions": {"K+": 5, "Cl-": 5},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm",
+    "gap": 1.5,
+    "min_clearance": 1.5
+  },
+  "output_dir": "examples/outputs/05_hj_tio2_pt_water"
+}

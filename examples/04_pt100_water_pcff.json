@@ -1,0 +1,19 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "ase",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [6, 6],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 200,
+    "density": 1.0,
+    "temperature": 300,
+    "field": "pcff"
+  },
+  "output_dir": "examples/outputs/04_pt100_water_pcff"
+}

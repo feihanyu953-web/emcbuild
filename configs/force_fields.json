@@ -1,0 +1,28 @@
+{
+  "pcff": {
+    "name": "Polymer Consistent Force Field",
+    "description": "General purpose force field for polymers and inorganic materials",
+    "suitable_for": ["interfaces", "polymers", "inorganic"],
+    "default": true
+  },
+  "charmm": {
+    "name": "Chemistry at HARvard Macromolecular Mechanics",
+    "description": "Force field for biological macromolecules",
+    "suitable_for": ["biological", "organic"]
+  },
+  "opls": {
+    "name": "Optimized Potentials for Liquid Simulations",
+    "description": "Force field for organic liquids and solutions",
+    "suitable_for": ["organic", "liquids"]
+  },
+  "trappe": {
+    "name": "Transferable Potentials for Phase Equilibria",
+    "description": "Force field for alkanes and alcohols",
+    "suitable_for": ["alkanes", "alcohols"]
+  },
+  "cff": {
+    "name": "Consistent Force Field",
+    "description": "General purpose force field",
+    "suitable_for": ["general"]
+  }
+}
