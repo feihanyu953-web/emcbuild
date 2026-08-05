@@ -38,7 +38,8 @@ emcbuild/
 ## Quick Workflow
 
 ```powershell
-cd 'E:\claude-data\skills\emcbuild'
+# <skill-dir> = 本 skill 安装目录(全局 ~/.claude/skills/emcbuild/ 或项目 .claude/skills/emcbuild/)
+cd '<skill-dir>'
 conda run -n DFTbuild python scripts\build.py examples\pt100_interface.json
 ```
 

@@ -7,3 +7,7 @@ __pycache__/
 *.emc.gz
 *.pdb.gz
 *.psf.gz
+
+# Third-party EMC binaries - not redistributable, fetch from official source
+emc_packages/
+
