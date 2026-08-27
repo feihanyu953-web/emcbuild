@@ -378,6 +378,55 @@ Water molecules overlapping adsorbates (distance < vdw_sum × 0.7) are automatic
 - **Top vacuum**: 15 Å above the highest atom
 - **4-layer Pt(100) 3×3 surface** is a recommended minimum for realistic electrolyte models
 
+### Density pitfall (fixed 2026-08-27 — do not regress)
+
+The EMC templates size the box as a **cube** derived from the requested density:
+
+```text
+vphase1 -> mphase1/nav/density1        (* target volume *)
+lbox    -> (vphase1/fshape)^(1/3)      (* cube edge *)
+lxx     -> lphase1                     (* = fshape*lbox *)
+lyy     -> lbox
+lzz     -> lbox
+```
+
+To tile a slab, `build.py` must override `lxx`/`lyy` with the surface dimensions.
+**`lzz` must be rescaled in the same step**, otherwise it keeps the cube-edge value
+and the real volume becomes `lx·ly·lbox` instead of `vphase1` — the electrolyte is
+silently compressed.
+
+The error scales with molecule count, so it is invisible on small test cases and
+severe on production ones. Measured on Pt(100) 6×6 (16.63 × 16.63 Å) with
+600 H₂O + Na⁺ + OH⁻ at `density: 1.0`:
+
+| | box z | volume | density |
+|---|---|---|---|
+| Without `lzz` rescale | 26.21 Å | 7251 Å³ | **2.485 g/cm³** (2.48× off) |
+| With `lzz` rescale | 65.13 Å | 18015 Å³ | **1.000 g/cm³** ✓ |
+
+The fix expresses `lzz` in EMC's own variables so EMC's exact masses are used:
+
+```text
+lzz -> vphase1/(<lx>*<ly>)
+```
+
+This is deliberately **not** a Python-side mass calculation. A local mass table
+would have to cover the 91-residue carb field plus all OPLS solvents, and any
+missing entry would silently reintroduce a wrong density. `vphase1` is already
+correct for every species EMC can type.
+
+**Guard**: `_verify_box_density()` runs on every EMC output and prints a loud
+warning if the measured density deviates >10% from the request. A `Density check:
+X g/cm3 (target Y) OK` line in the build log is the confirmation. If you see
+`!! DENSITY WARNING`, inspect `lzz` in the generated `build_water.emc` before
+using the box for sampling.
+
+Only the slab path overrides the box (`surface_cell_xy` set). Electrolyte-only
+mode leaves the template cube untouched, so its density was always correct; the
+guard covers both paths.
+
+Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
+
 ## Output Files
 
 | File | Format | Notes |
@@ -410,3 +459,4 @@ Water molecules overlapping adsorbates (distance < vdw_sum × 0.7) are automatic
 | `EMC output not found` (molecule mode) | SMILES not recognized by PCFF | Check SMILES string; add `field: "pcff"` to config if using solvent mode |
 | `SMILES required with builder='emc'` | Missing SMILES | Add `"smiles": "..."` to the adsorbate entry |
 | `Undefined variable` | Missing comma in EMC variables block | Check generated `build_water.emc` for syntax |
+| `!! DENSITY WARNING: ... Nx off` | `lzz` not rescaled after overriding `lxx`/`lyy` — electrolyte compressed | See "Density pitfall" above; `lzz` must be `vphase1/(lx*ly)`, not `lbox` |

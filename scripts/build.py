@@ -830,6 +830,87 @@ def _sed_append(build_emc, pattern, lines):
         f.writelines(result)
 
 
+def _verify_box_density(data_path: str, target_density: float,
+                        tol: float = 0.10) -> float:
+    """Measure the actual density of an EMC LAMMPS data file and warn if off.
+
+    Guards the lzz rescaling in build_water_layer: if the EMC box geometry ever
+    stops tracking the requested density, this prints a loud warning instead of
+    silently handing a compressed electrolyte to the next stage. Returns the
+    measured density in g/cm3 (or 0.0 if it could not be parsed).
+    """
+    try:
+        lines = open(data_path, 'r').read().splitlines()
+
+        extent = {}
+        for line in lines:
+            for key in ('xlo xhi', 'ylo yhi', 'zlo zhi'):
+                if key in line:
+                    parts = line.split()
+                    extent[key] = float(parts[1]) - float(parts[0])
+        if len(extent) != 3:
+            return 0.0
+
+        # type_id -> mass, from the Masses section
+        masses = {}
+        idx = next((i for i, x in enumerate(lines)
+                    if x.strip() == 'Masses'), None)
+        if idx is None:
+            return 0.0
+        i = idx + 1
+        while i < len(lines) and not lines[i].strip().startswith(('Atoms', 'Bonds')):
+            parts = lines[i].split()
+            if len(parts) >= 2:
+                try:
+                    masses[int(parts[0])] = float(parts[1])
+                except ValueError:
+                    pass
+            i += 1
+
+        # count atoms per type
+        idx = next((i for i, x in enumerate(lines)
+                    if x.strip().startswith('Atoms')), None)
+        if idx is None:
+            return 0.0
+        counts = {}
+        i = idx + 1
+        while i < len(lines):
+            s = lines[i].strip()
+            if s.startswith(('Bonds', 'Angles', 'Velocities', 'Dihedrals')):
+                break
+            parts = s.split()
+            if len(parts) >= 7:
+                try:
+                    t = int(parts[2])
+                    counts[t] = counts.get(t, 0) + 1
+                except ValueError:
+                    pass
+            i += 1
+
+        volume = extent['xlo xhi'] * extent['ylo yhi'] * extent['zlo zhi']
+        total_mass = sum(masses.get(t, 0.0) * n for t, n in counts.items())
+        if volume <= 0 or total_mass <= 0:
+            return 0.0
+
+        # g/mol per A^3 -> g/cm3 : divide by Avogadro * 1e-24 = 0.6022140857
+        density = total_mass / (volume * 0.6022140857)
+
+        if target_density > 0 and abs(density - target_density) / target_density > tol:
+            print(f"  !! DENSITY WARNING: electrolyte box is "
+                  f"{density:.3f} g/cm3 but {target_density:.3f} was requested "
+                  f"({density / target_density:.2f}x off).")
+            print(f"     Check that lzz in build_water.emc was rescaled — "
+                  f"see SKILL.md 'Density pitfall'. Do not use this box for "
+                  f"production sampling.")
+        else:
+            print(f"  Density check: {density:.3f} g/cm3 "
+                  f"(target {target_density:.3f}) OK")
+        return density
+    except Exception as exc:
+        print(f"  Density check skipped ({type(exc).__name__}: {exc})")
+        return 0.0
+
+
 def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
                       output_dir: str, surface_cell_xy: tuple = None) -> str:
     """Build water+ion+solvent layer using EMC with template placeholder approach.
@@ -1159,16 +1240,30 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
     with open(build_emc, 'w', encoding='latin-1') as f:
         f.write(content)
 
-    # ---- Set water box xy ----
+    # ---- Set water box xy, then rescale z to preserve the target density ----
     if surface_cell_xy is not None:
         lx, ly = surface_cell_xy
-        # Water box xy should match surface dimensions
-        # The z dimension will be determined by EMC based on density and molecule count
+        # Water box xy must match surface dimensions so the layer tiles the slab.
         box_lx = lx
         box_ly = ly
         _sed(build_emc, 'lxx\t\t-> lphase1', f'lxx\t\t-> {box_lx:.4f}')
         _sed(build_emc, 'lyy\t\t-> lbox', f'lyy\t\t-> {box_ly:.4f}')
         print(f"  Water box xy: {box_lx:.2f} x {box_ly:.2f} A (matches surface)")
+
+        # lzz MUST be rescaled too. The template derives a cube from the target
+        # density (vphase1 -> mphase1/nav/density1; lbox -> (vphase1/fshape)^(1/3))
+        # and sets lxx/lyy/lzz off that cube. Overriding only lxx/lyy leaves
+        # lzz -> lbox, so the real volume becomes lx*ly*lbox instead of vphase1
+        # and the density is wrong by vphase1/(lx*ly*lbox). The error grows with
+        # molecule count: a 600-H2O layer on a 16.6 x 16.6 A slab came out at
+        # ~2.5 g/cm3 instead of 1.0 (see SKILL.md "Density pitfall").
+        # Fix: keep EMC's own volume and just redistribute it -> lzz = vphase1/(lxx*lyy).
+        # Expressed in EMC variables so EMC's exact masses are used; no local
+        # mass table (which would guess wrong for the 91-residue carb field).
+        _sed(build_emc, 'lzz\t\t-> lbox',
+             f'lzz\t\t-> vphase1/({box_lx:.4f}*{box_ly:.4f})')
+        print(f"  Water box z: rescaled to hold density {density} g/cm3 "
+              f"over {box_lx * box_ly:.1f} A^2")
 
     # ---- Run EMC ----
     total = water_count + total_solvent + total_ions
@@ -1204,6 +1299,9 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
             path = os.path.join(output_dir, name)
             if os.path.exists(path):
                 print(f"  EMC water layer: {path}")
+                # Confirm the box actually holds the requested density.
+                # Catches any regression of the lzz rescaling above.
+                _verify_box_density(path, density)
                 return path
 
     print(f"  Warning: EMC output not found, using surface only")
