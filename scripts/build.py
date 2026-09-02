@@ -745,6 +745,11 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
         return dx**2 + dy**2
 
     symbols = atoms.get_chemical_symbols()
+    # Freeze the surface atom set before the loop: atoms grows as adsorbates
+    # are appended, so re-deriving candidates from len(atoms) would let the
+    # previous adsorbate's atoms act as "surface atoms" and stack the next
+    # adsorbate on top of it.
+    n_surf = len(atoms)
 
     for i, ads in enumerate(ads_list):
         smiles = ads.get('smiles', None)
@@ -758,12 +763,12 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
         if target_element:
             # Filter by element (for heterojunctions: only exposed side)
             candidate_indices = [j for j, s in enumerate(symbols)
-                                if s == target_element]
+                                if s == target_element and j < n_surf]
             if not candidate_indices:
                 print(f"  Warning: no {target_element} atoms found, skipping {ads['name']}")
                 continue
         else:
-            candidate_indices = list(range(len(atoms)))
+            candidate_indices = list(range(n_surf))
 
         # Find surface-layer among candidates
         # For heterojunctions: detect if element is substrate (bottom) or film (top)
