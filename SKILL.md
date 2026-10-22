@@ -292,6 +292,14 @@ Config example:
 
 Mass fractions are automatically calculated. Explicit user counts are used in EMC clusters to avoid heavy/bulky ions being rounded to zero.
 
+> **Default placement rule (do not rely on luck):** adsorbates are placed on the
+> surface atom **closest to the cell center** (minimum-image PBC distance), so a
+> single adsorbate lands on an interior atom -- never on a fractional 0/1
+> boundary/corner atom -- unless the user explicitly chooses a site. The config
+> `site` key shown in examples is accepted but ignored by the current builder
+> (placement is always ontop of the chosen surface atom); request a different
+> position by editing the POSCAR or stating the target atom explicitly.
+
 ## Adsorbate Config (SMILES Support)
 
 ```json
