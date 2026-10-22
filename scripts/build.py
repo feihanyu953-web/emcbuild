@@ -718,38 +718,338 @@ def build_molecule_emc(name: str, smiles: str, output_dir: str,
     return mol
 
 
+# ─── Adsorbate site selection ────────────────────────────────────────
+
+# 'hollow' is an alias of 'fcc' (the lower-energy hollow on most metals).
+SITE_ALIASES = {'hollow': 'fcc'}
+SITE_CHOICES = ('ontop', 'bridge', 'fcc', 'hcp')
+
+
+def _frac_mic(delta_frac, cell2d):
+    """Cartesian vector of a fractional xy delta, minimum-image wrapped.
+
+    Fractional, NOT orthogonal dx % lx: the fcc(111) cell is hexagonal
+    (vectors at 120 deg) and an orthogonal wrap silently returns wrong
+    distances there (observed 2026-10-22: a spurious 2.40 A nearest
+    neighbor on Pt(111) where the true nn is 2.77 A).
+    """
+    d = np.asarray(delta_frac, dtype=float)
+    d = d - np.round(d)
+    return d @ cell2d
+
+
+def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
+    """Enumerate adsorption sites on one exposed face of the slab.
+
+    Assumes layer planes perpendicular to z (true for every surface this
+    builder constructs). In-plane geometry runs in fractional coordinates
+    (see _frac_mic). Sites are ranked by in-plane distance to the cell
+    center (0.5, 0.5), so the first site of each type is interior and
+    never on a fractional 0/1 boundary; multi-adsorbate builds rotate
+    through the ranking.
+
+    Returns {site_type: [site, ...]} where each site carries:
+      xy    cartesian (x, y) of the site
+      frac  fractional (fx, fy) of the site (may lie slightly outside [0,1))
+      score distance-to-center used for the ranking
+      info  human-readable placement note
+    """
+    pos = atoms.positions
+    cell = np.array(atoms.cell)
+    cell2d = cell[:2, :2]
+    symbols = atoms.get_chemical_symbols()
+    frac = atoms.get_scaled_positions(wrap=False)
+    center = (0.5, 0.5)
+
+    def f_dist(fa, fb):
+        return float(np.linalg.norm(
+            _frac_mic(np.asarray(fa) - np.asarray(fb), cell2d)))
+
+    # ontop: one per surface atom
+    ontop = [{'xy': pos[i][:2].copy(), 'frac': frac[i][:2],
+              'info': f'ontop of atom {i} ({symbols[i]})',
+              'score': f_dist(frac[i][:2], center)}
+             for i in surface_indices]
+    ontop.sort(key=lambda s: s['score'])
+
+    if len(surface_indices) < 2:
+        return {'ontop': ontop, 'bridge': [], 'fcc': [], 'hcp': []}
+
+    def matching_z(fxy):
+        """z of same-element atoms whose xy matches fxy (within 0.1 A)."""
+        sym = symbols[surface_indices[0]]
+        return [pos[k, 2] for k in range(n_surf)
+                if symbols[k] == sym and f_dist(frac[k][:2], fxy) <= 0.1]
+
+    def depth_below(fxy):
+        """Depth of the closest same-element atom straight through the face."""
+        depths = [z_sign * (z_surf - z) for z in matching_z(fxy)]
+        depths = [d for d in depths if d > 0.5]
+        return min(depths) if depths else None
+
+    # nearest-neighbor shell of the surface layer (in-plane)
+    nn = min(f_dist(frac[a][:2], frac[b][:2])
+             for n, a in enumerate(surface_indices)
+             for b in surface_indices[n + 1:])
+    neighbors = {i: [j for j in surface_indices
+                     if j != i
+                     and abs(f_dist(frac[i][:2], frac[j][:2]) - nn) < 0.05]
+                 for i in surface_indices}
+
+    # bridge: midpoints of nearest-neighbor pairs
+    bridge = []
+    for n, i in enumerate(surface_indices):
+        for j in neighbors[i]:
+            if j <= i:
+                continue
+            d = frac[j][:2] - frac[i][:2]
+            d -= np.round(d)
+            f_mid = frac[i][:2] + d / 2.0
+            xy_mid = pos[i][:2] + _frac_mic(d, cell2d) / 2.0
+            bridge.append({'xy': xy_mid, 'frac': f_mid,
+                           'info': f'bridge of atoms {i}-{j}',
+                           'score': f_dist(f_mid, center)})
+    bridge.sort(key=lambda s: s['score'])
+
+    # hollows: centroids of equilateral nearest-neighbor triangles
+    # ((111)-type packing only; each triangle is found from all three of
+    # its vertices, hence the wrapped-fraction dedupe key)
+    triangles = {}
+    for i in surface_indices:
+        nb = neighbors[i]
+        for a in range(len(nb)):
+            for b in range(a + 1, len(nb)):
+                j, k = nb[a], nb[b]
+                if abs(f_dist(frac[j][:2], frac[k][:2]) - nn) > 0.05:
+                    continue
+                dj = frac[j][:2] - frac[i][:2]
+                dj -= np.round(dj)
+                dk = frac[k][:2] - frac[i][:2]
+                dk -= np.round(dk)
+                f_c = frac[i][:2] + (dj + dk) / 3.0
+                # mod AFTER rounding so a value epsilon below 1.0 folds to 0.0
+                key = tuple(np.round(np.mod(f_c, 1.0), 3) % 1.0)
+                if key in triangles:
+                    continue
+                xy_c = pos[i][:2] + (_frac_mic(dj, cell2d)
+                                     + _frac_mic(dk, cell2d)) / 3.0
+                # reject degenerate triples: (i-d, i, i+d) collinear through
+                # PBC all sit at nn distance of each other, but their
+                # centroid lands on the middle atom, not on a hollow. A real
+                # hollow centroid is r_tr = nn/sqrt(3) ~ 0.58*nn from every
+                # corner atom.
+                if min(f_dist(frac[m][:2], f_c)
+                       for m in surface_indices) < 0.5 * nn:
+                    continue
+                triangles[key] = {'xy': xy_c, 'frac': f_c,
+                                  'score': f_dist(f_c, center)}
+
+    # classify hollows: a same-element atom one layer spacing straight
+    # beneath the site -> hcp; none or deeper -> fcc. The layer spacing is
+    # measured from adjacent z levels of the same-element stack -- NOT from
+    # "the atom directly beneath a surface atom": in fcc(111) ABC stacking
+    # an atom's xy re-occurs only 3 layers down, so that measurement returns
+    # 3x the true spacing and misclassifies every hollow as hcp.
+    surf_sym = symbols[surface_indices[0]]
+    z_levels = np.unique(np.round(
+        [pos[k, 2] for k in range(n_surf) if symbols[k] == surf_sym], 4))
+    d_layer = (float(np.min(np.diff(z_levels)))
+               if len(z_levels) > 1 else None)
+    fcc, hcp = [], []
+    for t in triangles.values():
+        dep = depth_below(t['frac'])
+        if dep is not None and d_layer is not None and dep < 1.5 * d_layer:
+            hcp.append({**t,
+                        'info': f'hcp hollow (subsurface atom at {dep:.2f} A)'})
+        else:
+            note = ('no subsurface atom' if dep is None
+                    else f'subsurface atom at {dep:.2f} A')
+            fcc.append({**t, 'info': f'fcc hollow ({note})'})
+    fcc.sort(key=lambda s: s['score'])
+    hcp.sort(key=lambda s: s['score'])
+
+    return {'ontop': ontop, 'bridge': bridge, 'fcc': fcc, 'hcp': hcp}
+
+
+# ─── Adsorbate site selection ────────────────────────────────────────
+
+# 'hollow' is an alias of 'fcc' (the lower-energy hollow on most metals).
+SITE_ALIASES = {'hollow': 'fcc'}
+SITE_CHOICES = ('ontop', 'bridge', 'fcc', 'hcp')
+
+
+def _frac_mic(delta_frac, cell2d):
+    """Cartesian vector of a fractional xy delta, minimum-image wrapped.
+
+    Fractional, NOT orthogonal dx % lx: the fcc(111) cell is hexagonal
+    (vectors at 120 deg) and an orthogonal wrap silently returns wrong
+    distances there (observed 2026-10-22: a spurious 2.40 A nearest
+    neighbor on Pt(111) where the true nn is 2.77 A).
+    """
+    d = np.asarray(delta_frac, dtype=float)
+    d = d - np.round(d)
+    return d @ cell2d
+
+
+def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
+    """Enumerate adsorption sites on one exposed face of the slab.
+
+    Assumes layer planes perpendicular to z (true for every surface this
+    builder constructs). In-plane geometry runs in fractional coordinates
+    (see _frac_mic). Sites are ranked by in-plane distance to the cell
+    center (0.5, 0.5), so the first site of each type is interior and
+    never on a fractional 0/1 boundary; multi-adsorbate builds rotate
+    through the ranking.
+
+    Returns {site_type: [site, ...]} where each site carries:
+      xy    cartesian (x, y) of the site
+      frac  fractional (fx, fy) of the site (may lie slightly outside [0,1))
+      score distance-to-center used for the ranking
+      info  human-readable placement note
+    """
+    pos = atoms.positions
+    cell = np.array(atoms.cell)
+    cell2d = cell[:2, :2]
+    symbols = atoms.get_chemical_symbols()
+    frac = atoms.get_scaled_positions(wrap=False)
+    center = (0.5, 0.5)
+
+    def f_dist(fa, fb):
+        return float(np.linalg.norm(
+            _frac_mic(np.asarray(fa) - np.asarray(fb), cell2d)))
+
+    # ontop: one per surface atom
+    ontop = [{'xy': pos[i][:2].copy(), 'frac': frac[i][:2],
+              'info': f'ontop of atom {i} ({symbols[i]})',
+              'score': f_dist(frac[i][:2], center)}
+             for i in surface_indices]
+    ontop.sort(key=lambda s: s['score'])
+
+    if len(surface_indices) < 2:
+        return {'ontop': ontop, 'bridge': [], 'fcc': [], 'hcp': []}
+
+    def matching_z(fxy):
+        """z of same-element atoms whose xy matches fxy (within 0.1 A)."""
+        sym = symbols[surface_indices[0]]
+        return [pos[k, 2] for k in range(n_surf)
+                if symbols[k] == sym and f_dist(frac[k][:2], fxy) <= 0.1]
+
+    def depth_below(fxy):
+        """Depth of the closest same-element atom straight through the face."""
+        depths = [z_sign * (z_surf - z) for z in matching_z(fxy)]
+        depths = [d for d in depths if d > 0.5]
+        return min(depths) if depths else None
+
+    # nearest-neighbor shell of the surface layer (in-plane)
+    nn = min(f_dist(frac[a][:2], frac[b][:2])
+             for n, a in enumerate(surface_indices)
+             for b in surface_indices[n + 1:])
+    neighbors = {i: [j for j in surface_indices
+                     if j != i
+                     and abs(f_dist(frac[i][:2], frac[j][:2]) - nn) < 0.05]
+                 for i in surface_indices}
+
+    # bridge: midpoints of nearest-neighbor pairs
+    bridge = []
+    for n, i in enumerate(surface_indices):
+        for j in neighbors[i]:
+            if j <= i:
+                continue
+            d = frac[j][:2] - frac[i][:2]
+            d -= np.round(d)
+            f_mid = frac[i][:2] + d / 2.0
+            xy_mid = pos[i][:2] + _frac_mic(d, cell2d) / 2.0
+            bridge.append({'xy': xy_mid, 'frac': f_mid,
+                           'info': f'bridge of atoms {i}-{j}',
+                           'score': f_dist(f_mid, center)})
+    bridge.sort(key=lambda s: s['score'])
+
+    # hollows: centroids of equilateral nearest-neighbor triangles
+    # ((111)-type packing only; each triangle is found from all three of
+    # its vertices, hence the wrapped-fraction dedupe key)
+    triangles = {}
+    for i in surface_indices:
+        nb = neighbors[i]
+        for a in range(len(nb)):
+            for b in range(a + 1, len(nb)):
+                j, k = nb[a], nb[b]
+                if abs(f_dist(frac[j][:2], frac[k][:2]) - nn) > 0.05:
+                    continue
+                dj = frac[j][:2] - frac[i][:2]
+                dj -= np.round(dj)
+                dk = frac[k][:2] - frac[i][:2]
+                dk -= np.round(dk)
+                f_c = frac[i][:2] + (dj + dk) / 3.0
+                # mod AFTER rounding so a value epsilon below 1.0 folds to 0.0
+                key = tuple(np.round(np.mod(f_c, 1.0), 3) % 1.0)
+                if key in triangles:
+                    continue
+                xy_c = pos[i][:2] + (_frac_mic(dj, cell2d)
+                                     + _frac_mic(dk, cell2d)) / 3.0
+                # reject degenerate triples: (i-d, i, i+d) collinear through
+                # PBC all sit at nn distance of each other, but their
+                # centroid lands on the middle atom, not on a hollow. A real
+                # hollow centroid is r_tr = nn/sqrt(3) ~ 0.58*nn from every
+                # corner atom.
+                if min(f_dist(frac[m][:2], f_c)
+                       for m in surface_indices) < 0.5 * nn:
+                    continue
+                triangles[key] = {'xy': xy_c, 'frac': f_c,
+                                  'score': f_dist(f_c, center)}
+
+    # classify hollows: a same-element atom one layer spacing straight
+    # beneath the site -> hcp; none or deeper -> fcc. The layer spacing is
+    # measured from adjacent z levels of the same-element stack -- NOT from
+    # "the atom directly beneath a surface atom": in fcc(111) ABC stacking
+    # an atom's xy re-occurs only 3 layers down, so that measurement returns
+    # 3x the true spacing and misclassifies every hollow as hcp.
+    surf_sym = symbols[surface_indices[0]]
+    z_levels = np.unique(np.round(
+        [pos[k, 2] for k in range(n_surf) if symbols[k] == surf_sym], 4))
+    d_layer = (float(np.min(np.diff(z_levels)))
+               if len(z_levels) > 1 else None)
+    fcc, hcp = [], []
+    for t in triangles.values():
+        dep = depth_below(t['frac'])
+        if dep is not None and d_layer is not None and dep < 1.5 * d_layer:
+            hcp.append({**t,
+                        'info': f'hcp hollow (subsurface atom at {dep:.2f} A)'})
+        else:
+            note = ('no subsurface atom' if dep is None
+                    else f'subsurface atom at {dep:.2f} A')
+            fcc.append({**t, 'info': f'fcc hollow ({note})'})
+    fcc.sort(key=lambda s: s['score'])
+    hcp.sort(key=lambda s: s['score'])
+
+    return {'ontop': ontop, 'bridge': bridge, 'fcc': fcc, 'hcp': hcp}
+
+
 def add_adsorbates(atoms, ads_list, output_dir=None):
-    """Place adsorbates on the surface at ontop sites.
+    """Place adsorbates on the surface at a chosen site type.
+
+    Per-adsorbate config keys:
+    - site: 'ontop' (default) | 'bridge' | 'fcc' | 'hcp' | 'hollow'
+      (alias of fcc). Unsupported values raise ValueError instead of
+      being silently ignored; fcc/hcp need (111)-type triangular packing.
+    - height: adsorbate origin height above the surface plane (A, default 1.8)
+    - element: restrict the surface to this element (heterojunctions)
+    - smiles / builder: molecule construction, see build_molecule()
 
     Placement logic (generic, works for any molecule):
-    - If 'element' is specified, only consider atoms of that element
-    - Find top-layer surface atoms
-    - Prefer interior atoms over boundary atoms (avoid corners/edges)
-    - For each adsorbate, pick an ontop site (directly above a surface atom)
-    - z position: surface_atom_z + height
+    - Find the exposed face (top for films/slabs, bottom for substrates)
+    - Rank the sites of the requested type by in-plane distance to the
+      cell center: the first adsorbate lands on the interior-most site
+      (never on a fractional 0/1 boundary/corner); further adsorbates
+      rotate through the ranking so they spread inward-out
     """
-    cell = atoms.cell
-    cx = cell[0, 0] / 2.0
-    cy = cell[1, 1] / 2.0
-
-    # Sort by distance to cell center using minimum image convention (PBC)
-    def dist_to_center_pbc(idx):
-        pos = atoms.positions[idx]
-        dx = (pos[0] - cx) % cell[0, 0]
-        dy = (pos[1] - cy) % cell[1, 1]
-        # minimum image
-        if dx > cell[0, 0] / 2:
-            dx -= cell[0, 0]
-        if dy > cell[1, 1] / 2:
-            dy -= cell[1, 1]
-        return dx**2 + dy**2
-
     symbols = atoms.get_chemical_symbols()
     # Freeze the surface atom set before the loop: atoms grows as adsorbates
     # are appended, so re-deriving candidates from len(atoms) would let the
     # previous adsorbate's atoms act as "surface atoms" and stack the next
     # adsorbate on top of it.
     n_surf = len(atoms)
+
+    site_cache = {}
 
     for i, ads in enumerate(ads_list):
         smiles = ads.get('smiles', None)
@@ -758,6 +1058,14 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
                             builder=builder, output_dir=output_dir)
         height = ads.get('height', 1.8)
         target_element = ads.get('element', None)
+        site_type = str(ads.get('site', 'ontop')).strip().lower()
+        site_type = SITE_ALIASES.get(site_type, site_type)
+        if site_type not in SITE_CHOICES:
+            raise ValueError(
+                f"Unsupported adsorbate site '{ads.get('site')}' for "
+                f"'{ads['name']}': choose from ontop / bridge / fcc / hcp "
+                f"(hollow = fcc). Builds before 2026-10-22 silently "
+                f"ignored this key and always placed ontop.")
 
         # Determine candidate atoms
         if target_element:
@@ -790,15 +1098,30 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
         surface_indices = [candidate_indices[j] for j, z in enumerate(z_coords)
                           if abs(z - surf_z) < 0.5]
 
-        # Sort by distance to cell center (prefer interior, avoid boundaries)
-        surface_indices.sort(key=dist_to_center_pbc)
+        cache_key = (site_type, tuple(surface_indices),
+                     round(surf_z, 3), z_sign)
+        if cache_key not in site_cache:
+            all_sites = _enumerate_surface_sites(
+                atoms, surface_indices, n_surf, surf_z, z_sign)
+            site_cache[cache_key] = all_sites.get(site_type, [])
+        sites = site_cache[cache_key]
 
-        # Pick surface atom closest to center
-        site_idx = surface_indices[i % len(surface_indices)]
-        surface_pos = atoms.positions[site_idx]
+        if not sites:
+            raise ValueError(
+                f"No '{site_type}' site available on this surface "
+                f"({len(surface_indices)} surface atoms). Hollow sites "
+                f"need (111)-type triangular packing -- use ontop or "
+                f"bridge instead.")
+
+        site = sites[i % len(sites)]
+        fx, fy = site['frac'][0] % 1.0, site['frac'][1] % 1.0
+        print(f"  Placed '{ads['name']}' at {site['info']}, "
+              f"frac=({fx:.3f}, {fy:.3f}), height {height} A")
+        if fx < 0.05 or fx > 0.95 or fy < 0.05 or fy > 0.95:
+            print(f"  Warning: site within 0.05 of the cell boundary in xy")
 
         # Place adsorbate: above surface (film/slab) or below surface (substrate)
-        mol.translate([surface_pos[0], surface_pos[1], surf_z + z_sign * height])
+        mol.translate([site['xy'][0], site['xy'][1], surf_z + z_sign * height])
         atoms += mol
 
     return atoms

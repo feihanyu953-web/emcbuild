@@ -292,13 +292,29 @@ Config example:
 
 Mass fractions are automatically calculated. Explicit user counts are used in EMC clusters to avoid heavy/bulky ions being rounded to zero.
 
-> **Default placement rule (do not rely on luck):** adsorbates are placed on the
-> surface atom **closest to the cell center** (minimum-image PBC distance), so a
-> single adsorbate lands on an interior atom -- never on a fractional 0/1
-> boundary/corner atom -- unless the user explicitly chooses a site. The config
-> `site` key shown in examples is accepted but ignored by the current builder
-> (placement is always ontop of the chosen surface atom); request a different
-> position by editing the POSCAR or stating the target atom explicitly.
+## Adsorbate Site Selection
+
+The `site` key picks **where** on the surface the adsorbate lands (implemented
+2026-10-22; before that the key appeared in examples but was silently ignored —
+placement was hardcoded to ontop):
+
+| site | geometry | surfaces |
+|---|---|---|
+| `ontop` (default) | directly above a surface atom | any |
+| `bridge` | midpoint of a nearest-neighbor surface pair | any |
+| `fcc` / `hollow` | triangular hollow with no same-element atom one layer spacing beneath | (111)-type |
+| `hcp` | triangular hollow directly above a subsurface atom (one layer spacing) | (111)-type |
+
+- Unsupported values raise a `ValueError` (never silently ignored). fcc/hcp on
+  non-(111) surfaces (no triangular packing) raise with a clear message.
+- **Interior rule**: sites of the requested type are ranked by in-plane
+  distance to the cell center, so the first adsorbate lands on an interior
+  site — never on a fractional 0/1 boundary/corner. Multiple adsorbates
+  rotate through the ranking. The ranking uses fractional-coordinate minimum
+  image because the (111) cell is hexagonal (an orthogonal `dx % lx` wrap
+  mis-ranks atoms there).
+- `height` is the adsorbate-origin height above the surface plane (default 1.8 Å;
+  typical H starting heights: ontop ~1.5, bridge ~1.2, hollow ~1.0).
 
 ## Adsorbate Config (SMILES Support)
 
