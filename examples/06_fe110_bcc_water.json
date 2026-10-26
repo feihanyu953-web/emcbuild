@@ -1,0 +1,25 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "ase",
+    "element": "Fe",
+    "miller": [1, 1, 0],
+    "size": [4, 4],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "CO", "site": "longbridge", "height": 1.9}
+    ]
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 120,
+    "ions": {"Na+": 2, "Cl-": 2},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm"
+  },
+  "output_dir": "examples/outputs/06_fe110_bcc_water"
+}

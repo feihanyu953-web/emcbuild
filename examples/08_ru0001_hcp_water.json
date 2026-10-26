@@ -1,0 +1,25 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "ase",
+    "element": "Ru",
+    "miller": [0, 0, 1],
+    "size": [4, 4],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "H", "site": "hcp", "height": 1.0}
+    ]
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 120,
+    "ions": {"K+": 2, "OH-": 2},
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm"
+  },
+  "output_dir": "examples/outputs/08_ru0001_hcp_water"
+}

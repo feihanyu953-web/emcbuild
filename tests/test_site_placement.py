@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from ase.build import fcc100, fcc111
+from ase.build import fcc100, fcc110, fcc111
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -78,6 +78,8 @@ def test_interior_first():
     atoms, top, zmax = _pt111()
     sites = build._enumerate_surface_sites(atoms, top, len(atoms), zmax, 1)
     for kind, lst in sites.items():
+        if not lst:
+            continue
         scores = [s['score'] for s in lst]
         assert scores == sorted(scores), f'{kind} not sorted'
         f = lst[0]['frac'] % 1.0
@@ -131,15 +133,15 @@ def test_invalid_site_raises():
     """Unsupported site values raise instead of being silently ignored."""
     atoms, top, zmax = _pt111()
     try:
-        build.add_adsorbates(atoms, [{'name': 'H', 'site': 'fourfold'}])
+        build.add_adsorbates(atoms, [{'name': 'H', 'site': 'pentafold'}])
     except ValueError as e:
-        assert 'fourfold' in str(e)
+        assert 'pentafold' in str(e)
         return
-    raise AssertionError("site='fourfold' did not raise")
+    raise AssertionError("site='pentafold' did not raise")
 
 
 def test_non111_hollow_rejected():
-    """(100) has no triangular hollows: fcc/hcp empty, request raises."""
+    """(100) has 4-fold hollows, not fcc/hcp: fcc/hcp empty, request raises."""
     atoms = fcc100('Pt', size=(3, 3, 4), a=A_PT, vacuum=15.0)
     atoms.pbc = True
     pos = atoms.positions
@@ -147,18 +149,54 @@ def test_non111_hollow_rejected():
     top = [i for i in range(len(atoms)) if abs(pos[i, 2] - zmax) < 0.5]
     sites = build._enumerate_surface_sites(atoms, top, len(atoms), zmax, 1)
     assert len(sites['fcc']) == 0 and len(sites['hcp']) == 0
-    assert len(sites['bridge']) > 0  # (100) does have nn pairs
+    assert len(sites['bridge']) > 0   # (100) does have nn pairs
+    assert len(sites['hollow4']) == 9  # and four 4-fold hollows per 3x3
     try:
         build.add_adsorbates(atoms, [{'name': 'H', 'site': 'fcc'}])
     except ValueError as e:
-        assert '(111)' in str(e) or 'triangular' in str(e)
+        assert 'hollow4' in str(e)   # the error names what IS available
         return
     raise AssertionError("site='fcc' on (100) did not raise")
 
 
+def test_hollow4_placement_on_100():
+    """4-fold hollow on Pt(100): 4 equidistant Pt, centre of the square."""
+    atoms = fcc100('Pt', size=(3, 3, 4), a=A_PT, vacuum=15.0)
+    atoms.pbc = True
+    n0 = len(atoms)
+    build.add_adsorbates(atoms, [{'name': 'H', 'site': 'hollow4',
+                                  'height': 1.0}])
+    h = len(atoms) - 1
+    d = sorted(atoms.get_distance(h, k, mic=True) for k in range(n0))[:5]
+    assert max(d[:4]) - min(d[:4]) < 0.02, d[:4]
+    assert d[4] > d[3] + 0.3, d
+    expected = math.hypot(1.0, A_PT / 2.0)
+    assert abs(d[0] - expected) < 0.02, (d[0], expected)
+
+
+def test_longbridge_on_110():
+    """(110) trough: longbridge between atoms a/2 apart along the row."""
+    atoms = fcc110('Pt', size=(3, 3, 4), a=A_PT, vacuum=15.0)
+    atoms.pbc = True
+    pos = atoms.positions
+    zmax = pos[:, 2].max()
+    top = [i for i in range(len(atoms)) if abs(pos[i, 2] - zmax) < 0.5]
+    sites = build._enumerate_surface_sites(atoms, top, len(atoms), zmax, 1)
+    assert len(sites['longbridge']) == 9, len(sites['longbridge'])
+    # longbridge separation is a/sqrt(2) -> a/2*sqrt(2) = 2.77/1.414*... check
+    seps = [s['separ'] for s in sites['longbridge'] if 'separ' in s]
+    n0 = len(atoms)
+    build.add_adsorbates(atoms, [{'name': 'H', 'site': 'longbridge',
+                                  'height': 1.0}])
+    h = len(atoms) - 1
+    d = sorted(atoms.get_distance(h, k, mic=True) for k in range(n0))[:3]
+    assert max(d[:2]) - min(d[:2]) < 0.02, d[:2]
+
+
 TESTS = [test_site_counts, test_fcc_hcp_classification, test_interior_first,
          test_h_end_to_end_fcc, test_bridge_end_to_end, test_default_is_ontop,
-         test_invalid_site_raises, test_non111_hollow_rejected]
+         test_invalid_site_raises, test_non111_hollow_rejected,
+         test_hollow4_placement_on_100, test_longbridge_on_110]
 
 
 def main():

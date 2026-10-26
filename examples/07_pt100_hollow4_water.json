@@ -1,0 +1,25 @@
+{
+  "type": "interface",
+  "surface": {
+    "source": "ase",
+    "element": "Pt",
+    "miller": [1, 0, 0],
+    "size": [4, 4],
+    "layers": 4,
+    "vacuum": 15.0
+  },
+  "adsorbate": {
+    "list": [
+      {"name": "CO", "smiles": "[C-]#[O+]", "site": "hollow4", "height": 1.9},
+      {"name": "H", "site": "hollow4", "height": 1.0}
+    ]
+  },
+  "electrolyte": {
+    "source": "emc",
+    "water_count": 150,
+    "density": 1.0,
+    "temperature": 300,
+    "field": "charmm"
+  },
+  "output_dir": "examples/outputs/07_pt100_hollow4_water"
+}

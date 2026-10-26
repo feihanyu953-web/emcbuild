@@ -129,9 +129,60 @@ For solvents not in the built-in SMILES map, use the `name:smiles` format:
 
 | type | surface config | 说明 |
 |---|---|---|
-| `slab` | `element`, `miller`, `size`, `layers` | FCC/BCC metal slabs, any miller index |
+| `slab` | `element`, `miller`, `size`, `layers` | 任意晶体结构 + 任意 Miller 指数，元素覆盖见下 |
 | `heterojunction` | `film` + `substrate` (pymatgen) | 通用异质结，自动晶格匹配 |
 | `nanotube` | `n`, `m`, `length` | Carbon nanotubes |
+
+### Slab elements and crystal structures
+
+The slab builder takes the crystal structure and lattice constant from
+ASE's `reference_states` database — it does **not** assume fcc. That
+covers 79 elements across fcc / bcc / hcp / diamond / sc / bct /
+orthorhombic / rhombohedral.
+
+| Structure | Elements | Low-index faces verified |
+|---|---|---|
+| fcc | 20: Ac Ag Al Ar Au Ca Ce Cu Ir Kr Ne Ni Pb Pd Pt Rh Sr Th Xe Yb | (111) (100) (110) |
+| bcc | 14: Ba Cr Cs Eu Fe K Li Mo Na Nb Rb Ta V W | (110) (100) (111) |
+| hcp | 27: Be Cd Co Dy Er Gd Hf Ho La Lu Mg Nd Os Pr Re Ru Sc Se Tb Tc Te Ti Tl Tm Y Zn Zr | (0001) (10-10) |
+| diamond | 3: C Ge Si | (111) (100) |
+| others | As Bi Br Cl Ga Hg I In Np Po S Sb Sm Sn U | (100) |
+
+Only a handful of lattice constants are overridden locally (`LATTICE` in
+`scripts/build.py`: Pt Pd Au Ag Cu Ni Fe W Mo, used to keep published
+values for the common catalysts); everything else uses ASE's value.
+
+**Five elements cannot be built from ASE's reference data** and raise an
+actionable error instead of producing a wrong cell:
+
+| Element | Why | Workaround |
+|---|---|---|
+| `P`, `Mn` | ASE marks them `cubic` with a = 7.17 / 8.89 Å — not a simple-cubic cell | pass `structure` + `a`, or a POSCAR/CIF |
+| `B`, `Pa` | tetragonal, but ASE has no atomic basis for them | POSCAR/CIF |
+| `Pu` | no lattice constant in ASE's database | `structure`, `a`, `c` + a structure file |
+
+**Manual override** when ASE's value is not what you want:
+
+```json
+"surface": {
+  "element": "Mn", "miller": [1, 1, 0], "size": [3, 3], "layers": 4,
+  "structure": "bcc", "a": 2.89,
+  "c": 4.28            // hcp only, optional
+}
+```
+
+Nothing fails silently any more: an unknown element, a `cubic` entry that
+is not simple cubic, or a structure ASE cannot cut all raise `ValueError`
+naming the element and the fix. Before 2026-10-26 a missing element
+silently became a = 3.8 Å fcc (Ti, Ru, Co, Cr came out 30–50 % wrong) and
+Fe/W/Mo — which *were* in the table — were still forced onto an fcc
+lattice, 18 % short in nearest-neighbour distance.
+
+Generic (non-low-index) cuts go through `ase.build.surface()`, which
+requires the **conventional** cell; using the primitive cell made every
+interlayer spacing wrong. Both paths are pinned by
+`tests/test_slab_elements.py`.
+
 
 ## Force Fields
 
@@ -296,17 +347,41 @@ Mass fractions are automatically calculated. Explicit user counts are used in EM
 
 The `site` key picks **where** on the surface the adsorbate lands (implemented
 2026-10-22; before that the key appeared in examples but was silently ignored —
-placement was hardcoded to ontop):
+placement was hardcoded to ontop). Hitherto only triangular nets were
+supported; since 2026-10-26 site enumeration is geometric and works on any
+surface this builder can produce.
 
 | site | geometry | surfaces |
 |---|---|---|
 | `ontop` (default) | directly above a surface atom | any |
 | `bridge` | midpoint of a nearest-neighbor surface pair | any |
-| `fcc` / `hollow` | triangular hollow with no same-element atom one layer spacing beneath | (111)-type |
-| `hcp` | triangular hollow directly above a subsurface atom (one layer spacing) | (111)-type |
+| `longbridge` | trough midpoint between a farther pair (e.g. the a/√2 row on (110)) | (110), stepped faces |
+| `hollow3` | 3-fold hollow: ring of 3 equidistant surface atoms | (111), (0001), bcc(111), bcc(110) |
+| `hollow4` | 4-fold hollow: ring of 4 equidistant surface atoms | (100), (110) |
+| `hollow` | whatever hollow the surface has, preferably fcc | any |
+| `fcc` | 3-fold hollow with its subsurface atom **two** layer spacings down | close-packed (111)/(0001) only |
+| `hcp` | 3-fold hollow with its subsurface atom **one** layer spacing down | close-packed (111)/(0001) only |
 
-- Unsupported values raise a `ValueError` (never silently ignored). fcc/hcp on
-  non-(111) surfaces (no triangular packing) raise with a clear message.
+Aliases: `top`/`atop` → `ontop`, `shortbridge` → `bridge`, `long` → `longbridge`,
+`3fold`/`threefold` → `hollow3`, `4fold`/`fourfold` → `hollow4`.
+
+**How hollows are found.** A hollow is a point whose nearest surface atoms form
+a ring of N equidistant neighbours — a Voronoi vertex of the surface-atom
+point set. The code enumerates empty circumcircles of nearby atom triples and
+keeps their centres, so the coordination number N comes out of the geometry
+instead of a per-Miller-index rule. That is why the same code gives 3-fold
+hollows on triangular nets and 4-fold hollows on square/rectangular ones.
+
+**`fcc` vs `hcp` are not Miller indices.** They name the two 3-fold hollows of
+an ABC vs ABA close packing, distinguished by whether an atom sits one layer
+spacing below. The code checks that the net actually *is* close-packed (the
+in-plane neighbour distance equals the bulk nearest-neighbour distance) before
+using either name, so a bcc(111) net — same triangles, different stacking —
+reports `hollow3` only, never a bogus `fcc`. On hcp(0001) the site with no
+atom underneath is the fcc-type one.
+
+- Unsupported values raise a `ValueError` naming the sites that *are*
+  available on that surface (never silently ignored, never a silent ontop).
 - **Interior rule**: sites of the requested type are ranked by in-plane
   distance to the cell center, so the first adsorbate lands on an interior
   site — never on a fractional 0/1 boundary/corner. Multiple adsorbates
@@ -315,6 +390,17 @@ placement was hardcoded to ontop):
   mis-ranks atoms there).
 - `height` is the adsorbate-origin height above the surface plane (default 1.8 Å;
   typical H starting heights: ontop ~1.5, bridge ~1.2, hollow ~1.0).
+
+Examples:
+
+```json
+"adsorbate": {"list": [
+  {"name": "CO", "site": "hollow4", "height": 1.9},     // Pt(100) 4-fold
+  {"name": "CO", "site": "longbridge", "height": 1.9},  // Fe(110) trough
+  {"name": "H",  "site": "fcc", "height": 1.0},         // Pt(111)
+  {"name": "H",  "site": "hcp", "height": 1.0}          // Ru(0001)
+]}
+```
 
 ## Adsorbate Config (SMILES Support)
 
@@ -363,7 +449,7 @@ placement was hardcoded to ontop):
 
 | Source | Format | Use Case | Example |
 |---|---|---|---|
-| ASE built-in | `"element"` | Simple metals (FCC/BCC) | `"Pt"` |
+| ASE built-in | `"element"` | 79 metals, any structure | `"Pt"`, `"Ru"`, `"Fe"` |
 | Materials Project | `mp-xxx` | Oxides, compounds | `"mp-20194"` |
 | COD | `cod_xxxxx` | Organic crystals | `"cod_12345"` |
 | PubChem | `pubchem_xxx` | Molecules | `"pubchem_123591"` |
@@ -372,7 +458,7 @@ placement was hardcoded to ontop):
 | Local file | `/path/to/file` | Any structure | `"./POSCAR"` |
 
 **Notes**:
-- **ASE built-in**: Fast, no network, limited to simple metals (Pt, Pd, Au, Ag, Cu, Ni, Fe, W, Mo)
+- **ASE built-in**: Fast, no network. Covers whatever ASE's `reference_states` knows: 79 elements over fcc/bcc/hcp/diamond/sc/bct and more (see "Supported Structures"). Override with `structure` / `a` / `c` when you need a non-default cell.
 - **Materials Project**: Requires API key in `configs/databases.json`, best for oxides/compounds
 - **COD**: Free, good for organic crystals, may need proxy for stable connection
 - **PubChem**: Free, for molecules, uses curl internally (Python has SSL issues). Note: large molecules (C60, fullerenes) may only have 2D coordinates
@@ -470,6 +556,8 @@ Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
 - **OH- display in POSCAR**: OH- atoms merge with water O/H (same element). Use `water.data` to verify OH- location.
 - **`water_ions_carb.prm/top`**: the EMC-bundled merged file has duplicate ITEM sections and causes segfault. This skill uses separate dual-field loading instead of the broken merged file.
 - **ASE vs complex organics**: ASE `molecule(smiles)` falls back to rough geometries for molecules with >5 heavy atoms or multiple rotatable bonds. Use `"builder": "emc"` for these cases (requires PCFF force field).
+- **Slab needs a crystal structure ASE knows**: 79 elements build from `reference_states`; P, Mn, B, Pa and Pu cannot (see "Supported Structures"). They raise instead of silently falling back to fcc.
+- **Site detection is a 2-D net check**: it assumes the exposed face is a single z-plane and the surface atoms form the net the adsorbate sees. Stepped/reconstructed faces are only partly covered — `ontop`/`bridge` work, `hollowN` on a terrace below the top step is not enumerated (the surface layer is `|z - z_max| < 0.5`). Pass `site_xy`-style placement by hand or build the flat facet if you need terrace hollows on a vicinal surface.
 
 ## Troubleshooting
 
@@ -484,3 +572,8 @@ Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
 | `SMILES required with builder='emc'` | Missing SMILES | Add `"smiles": "..."` to the adsorbate entry |
 | `Undefined variable` | Missing comma in EMC variables block | Check generated `build_water.emc` for syntax |
 | `!! DENSITY WARNING: ... Nx off` | `lzz` not rescaled after overriding `lxx`/`lyy` — electrolyte compressed | See "Density pitfall" above; `lzz` must be `vphase1/(lx*ly)`, not `lbox` |
+| `No lattice constant for '<El>'` | ASE has no `a` for that element (Pu) | add `"a"` to the surface config |
+| `ASE's reference data for '<El>' is marked 'cubic' but is not` | P, Mn — ASE's a = 7.17/8.89 Å is not a simple-cubic cell | pass `"structure"` + `"a"`, or a POSCAR/CIF |
+| `Cannot cut <structure>-<El> <miller>` | ASE needs an atomic basis it does not have (B, Pa) | build from POSCAR/CIF via `surface.source` |
+| `No '<site>' site available on this surface` | that geometry does not exist here | the message lists the site types that do exist on this surface |
+| `hollow4` missing on (111) | (111) has no 4-fold hollow | use `fcc`/`hcp`/`hollow3`; conversely `hollow4` is the one to use on (100)/(110) |

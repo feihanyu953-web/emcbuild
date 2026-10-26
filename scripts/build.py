@@ -21,7 +21,12 @@ from pathlib import Path
 
 import numpy as np
 from ase import Atoms
-from ase.build import add_adsorbate, fcc100, fcc111, nanotube, molecule
+import numpy as np
+from ase import Atoms
+from ase.build import (add_adsorbate, bcc100, bcc110, bcc111, bulk,
+                       diamond100, diamond111, fcc100, fcc110, fcc111,
+                       hcp0001, molecule, nanotube, surface)
+from ase.data import atomic_numbers, reference_states
 from ase.io import read, write
 
 
@@ -319,23 +324,134 @@ def _get_structure(source: str):
 
 # ─── Surface builders (ASE) ──────────────────────────────────────────
 
+# Lattice constants used for an explicit override ("Pt:fcc:3.92") and for
+# the (100)/(111) shortcuts. Everything not listed here takes its lattice
+# constant and crystal structure from ASE's reference_states database.
 LATTICE = {
     'Pt': 3.92, 'Pd': 3.89, 'Au': 4.08, 'Ag': 4.09,
     'Cu': 3.61, 'Ni': 3.52, 'Fe': 2.87, 'W': 3.16, 'Mo': 3.15
 }
 
+# ASE canonical surface builders, keyed by (structure, miller). These encode
+# the in-plane cell shape and the stacking offsets; the generic surface()
+# path needs the conventional cell to get the same layer spacings, but its
+# `size` is counted in its own repeat units, so the faces people actually
+# build are routed through the canonical functions to keep size semantics
+# identical across surfaces. Deeper-index faces (211, 310, ...) go through
+# the generic path, which handles any Miller index.
+_CANONICAL_SURFACE = {
+    ('fcc', (1, 0, 0)): fcc100,
+    ('fcc', (1, 1, 0)): fcc110,
+    ('fcc', (1, 1, 1)): fcc111,
+    ('bcc', (1, 0, 0)): bcc100,
+    ('bcc', (1, 1, 0)): bcc110,
+    ('bcc', (1, 1, 1)): bcc111,
+    ('hcp', (0, 0, 1)): hcp0001,
+    ('diamond', (1, 0, 0)): diamond100,
+    ('diamond', (1, 1, 1)): diamond111,
+}
 
-def build_slab(element, miller, size, layers, vacuum):
-    a = LATTICE.get(element, 3.8)
+
+def _crystal_structure(element):
+    """ASE reference structure ('fcc', 'bcc', 'hcp', ...) or None."""
+    z = atomic_numbers.get(element)
+    if z is None:
+        return None
+    ref = reference_states[z]
+    return ref.get('symmetry') if ref else None
+
+
+def _slab_lattice_constant(element, structure, override=None):
+    """Lattice constant: explicit override, else ASE's reference value."""
+    if override is not None:
+        return float(override)
+    if element in LATTICE:
+        return LATTICE[element]
+    z = atomic_numbers.get(element)
+    ref = reference_states[z] if z is not None else None
+    if ref and ref.get('a'):
+        return ref['a']
+    raise ValueError(
+        f"No lattice constant for '{element}' ({structure}): ASE's "
+        f"reference_states entry has no 'a'. Pass one explicitly with "
+        f'"surface": {{"element": "{element}", "a": <angstrom>, ...}}.')
+
+
+def _hcp_c(element, structure, a, override=None):
+    """c for hcp: explicit override, else reference c/a (ASE's default)."""
+    if override is not None:
+        return float(override)
+    z = atomic_numbers[element]
+    ref = reference_states[z]
+    if structure == 'hcp':
+        return ref.get('c/a', 1.633) * a
+    return None
+
+
+def build_slab(element, miller, size, layers, vacuum,
+               structure=None, a=None, c=None):
+    """Build a slab with the element's own crystal structure.
+
+    Structure (fcc/bcc/hcp/diamond/...) comes from ASE's reference_states
+    database, not from an assumption of fcc; `structure`, `a` and `c`
+    override it for structures ASE cannot infer.
+
+    Cubic low-index faces go through ASE's canonical builders, which
+    encode the correct in-plane cell shape and interlayer stacking;
+    anything else falls back to ase.build.surface(), which needs the
+    CONVENTIONAL (not primitive) cell -- passing the primitive one
+    silently yields wrong interlayer spacings.
+    """
+    inferred = _crystal_structure(element)
+    structure = (structure or inferred or '').lower() or None
+    if structure is None:
+        raise ValueError(
+            f"Unknown element '{element}': ASE has no reference structure, so "
+            f"the crystal structure cannot be inferred. Set "
+            f'"structure" ("fcc"/"bcc"/"hcp"/"diamond"/...) and "a" in the '
+            f"surface config, or point the config at a structure file.")
+
+    if structure in ('cubic',):
+        # ASE lists P and Mn as 'cubic' with a=7.17/8.89 A, which is not a
+        # simple-cubic cell (ASE refuses these too). Their real cells are
+        # orthorhombic (black P) and a 58-atom alpha-Mn cubic cell.
+        raise ValueError(
+            f"ASE's reference data for '{element}' is marked 'cubic' but is "
+            f"not a simple-cubic cell. Build it from a structure file "
+            f"(POSCAR/CIF) or pass an explicit structure + lattice "
+            f'("surface": {{"structure": "...", "a": ...}}).')
+
+    a_lat = _slab_lattice_constant(element, structure, a)
     m = tuple(miller)
-    if m == (1,0,0):
-        return fcc100(element, size=(size[0], size[1], layers), a=a, vacuum=vacuum)
-    if m == (1,1,1):
-        return fcc111(element, size=(size[0], size[1], layers), a=a, vacuum=vacuum)
-    from ase.build import surface, bulk
-    b = bulk(element, crystalstructure='fcc', a=a)
-    s = surface(b, m, layers, vacuum=vacuum)
-    return s.repeat((size[0], size[1], 1))
+    n = (size[0], size[1], layers)
+    c_lat = _hcp_c(element, structure, a_lat, c) if structure == 'hcp' else c
+
+    canonical = _CANONICAL_SURFACE.get((structure, m))
+    if canonical is not None:
+        kwargs = {'size': n, 'a': a_lat, 'vacuum': vacuum}
+        if structure == 'hcp':
+            kwargs['c'] = c_lat
+        return canonical(element, **kwargs)
+
+    # Generic cut: surface() requires the conventional cell for cubic
+    # lattices (primitive cells give 2x/3x the true layer spacing).
+    try:
+        if structure in ('fcc', 'bcc', 'diamond'):
+            conventional = bulk(element, crystalstructure=structure, a=a_lat,
+                                cubic=True)
+        elif structure == 'hcp':
+            conventional = bulk(element, crystalstructure='hcp', a=a_lat,
+                                c=c_lat)
+        else:
+            conventional = bulk(element, crystalstructure=structure, a=a_lat)
+        slab = surface(conventional, m, layers, vacuum=vacuum)
+    except (NotImplementedError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot cut {structure}-{element} {m} from ASE's reference "
+            f"data: {exc}. ASE needs an atomic basis for this structure, so "
+            f"build it from a POSCAR/CIF (surface.source) or use a "
+            f"low-index face of a supported structure.") from exc
+    return slab.repeat((size[0], size[1], 1))
 
 
 def build_nanotube(n, m, length, vacuum):
@@ -720,9 +836,19 @@ def build_molecule_emc(name: str, smiles: str, output_dir: str,
 
 # ─── Adsorbate site selection ────────────────────────────────────────
 
-# 'hollow' is an alias of 'fcc' (the lower-energy hollow on most metals).
-SITE_ALIASES = {'hollow': 'fcc'}
-SITE_CHOICES = ('ontop', 'bridge', 'fcc', 'hcp')
+# Site names are geometry, not surface-science folklore: 'hollowN' is a
+# hollow surrounded by N surface atoms. fcc/hcp are the two 3-fold hollows
+# on fcc(111)-type stacking, told apart by the subsurface atom.
+SITE_CHOICES = ('ontop', 'bridge', 'longbridge', 'fcc', 'hcp',
+                'hollow3', 'hollow4', 'hollow')
+SITE_ALIASES = {
+    'hollow': 'hollow',        # resolved per surface: fcc > hollow3 > hollow4
+    'hollow3': 'hollow3', '3fold': 'hollow3', 'threefold': 'hollow3',
+    'hollow4': 'hollow4', '4fold': 'hollow4', 'fourfold': 'hollow4',
+    'shortbridge': 'bridge', 'top': 'ontop', 'atop': 'ontop',
+    'long': 'longbridge',
+}
+
 
 
 def _frac_mic(delta_frac, cell2d):
@@ -738,6 +864,13 @@ def _frac_mic(delta_frac, cell2d):
     return d @ cell2d
 
 
+def pdist_site(f_xy, surf_frac, cell2d):
+    """Distances from a fractional xy point to every surface atom (min image)."""
+    d = np.asarray(f_xy) - np.asarray(surf_frac)
+    d -= np.round(d)
+    return np.linalg.norm(d @ cell2d, axis=1)
+
+
 def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
     """Enumerate adsorption sites on one exposed face of the slab.
 
@@ -748,11 +881,19 @@ def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
     never on a fractional 0/1 boundary; multi-adsorbate builds rotate
     through the ranking.
 
+    Hollow detection is geometric rather than (111)-specific: a hollow is
+    a point whose nearest surface atoms form a ring of N equidistant
+    neighbours, i.e. a Voronoi vertex of the surface-atom point set. That
+    covers 3-fold hollows on triangular nets (fcc/hcp(111), hcp(0001),
+    bcc(111)) and 4-fold hollows on square nets (fcc/bcc(100)) and on the
+    rectangular (110) net, without a per-Miller-index rule table.
+
     Returns {site_type: [site, ...]} where each site carries:
       xy    cartesian (x, y) of the site
       frac  fractional (fx, fy) of the site (may lie slightly outside [0,1))
       score distance-to-center used for the ranking
       info  human-readable placement note
+      k     (hollows only) number of equidistant surface atoms
     """
     pos = atoms.positions
     cell = np.array(atoms.cell)
@@ -765,6 +906,10 @@ def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
         return float(np.linalg.norm(
             _frac_mic(np.asarray(fa) - np.asarray(fb), cell2d)))
 
+    def key_of(f):
+        # mod AFTER rounding so a value epsilon below 1.0 folds to 0.0
+        return tuple(np.round(np.mod(np.asarray(f), 1.0), 3) % 1.0)
+
     # ontop: one per surface atom
     ontop = [{'xy': pos[i][:2].copy(), 'frac': frac[i][:2],
               'info': f'ontop of atom {i} ({symbols[i]})',
@@ -772,8 +917,10 @@ def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
              for i in surface_indices]
     ontop.sort(key=lambda s: s['score'])
 
+    empty = {k: [] for k in SITE_CHOICES if k != 'ontop'}
+    empty['ontop'] = ontop
     if len(surface_indices) < 2:
-        return {'ontop': ontop, 'bridge': [], 'fcc': [], 'hcp': []}
+        return empty
 
     def matching_z(fxy):
         """z of same-element atoms whose xy matches fxy (within 0.1 A)."""
@@ -810,218 +957,153 @@ def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
                            'info': f'bridge of atoms {i}-{j}',
                            'score': f_dist(f_mid, center)})
     bridge.sort(key=lambda s: s['score'])
+    bridge_keys = {key_of(b['frac']) for b in bridge}
 
-    # hollows: centroids of equilateral nearest-neighbor triangles
-    # ((111)-type packing only; each triangle is found from all three of
-    # its vertices, hence the wrapped-fraction dedupe key)
-    triangles = {}
-    for i in surface_indices:
-        nb = neighbors[i]
-        for a in range(len(nb)):
-            for b in range(a + 1, len(nb)):
-                j, k = nb[a], nb[b]
-                if abs(f_dist(frac[j][:2], frac[k][:2]) - nn) > 0.05:
+    # ── hollows: Voronoi vertices of the surface-atom net ────────────
+    # A Voronoi vertex is the circumcenter of an empty circumcircle, so
+    # enumerate circumcircles of nearby triples and keep the empty ones.
+    # Triples are drawn from the 1.6*nn neighbourhood shell: every hollow
+    # has at least one defining triple inside it (a square hollow is
+    # spanned by a right triangle of three of its four corners), which
+    # keeps this O(N) instead of O(N^3) on production-sized slabs.
+    surf_frac = frac[surface_indices][:, :2]
+    surf_xy = pos[surface_indices][:, :2]
+    m = len(surface_indices)
+    r_lim = 1.5 * nn
+
+    # pairwise distances on the surface net, minimum image
+    pdelta = surf_frac[:, None, :] - surf_frac[None, :, :]
+    pdelta -= np.round(pdelta)
+    pdist = np.linalg.norm(pdelta @ cell2d, axis=2)
+    np.fill_diagonal(pdist, np.inf)
+    near = [[k for k in range(m)
+             if k != i and pdist[i, k] <= 1.6 * nn] for i in range(m)]
+
+    hollows = {}
+    for i in range(m):
+        nbs = near[i]
+        for a in range(len(nbs)):
+            for b in range(a + 1, len(nbs)):
+                j, k = nbs[a], nbs[b]
+                u = _frac_mic(surf_frac[j] - surf_frac[i], cell2d)
+                v = _frac_mic(surf_frac[k] - surf_frac[i], cell2d)
+                den = 2.0 * (u[0] * v[1] - u[1] * v[0])
+                if abs(den) < 1e-9:
+                    continue                      # collinear: no circle
+                uu = float(u @ u)
+                vv = float(v @ v)
+                cx = (v[1] * uu - u[1] * vv) / den
+                cy = (u[0] * vv - v[0] * uu) / den
+                r = float(np.hypot(cx, cy))
+                if r < 1e-3 or r > r_lim:
+                    continue                      # atom site / not local
+                xy_c = surf_xy[i] + np.array([cx, cy])
+                f_c = xy_c @ np.linalg.inv(cell2d)
+                dd = pdist_site(f_c, surf_frac, cell2d)
+                if dd.min() < r - 1e-3:
+                    continue                      # another atom inside
+                key = key_of(f_c)
+                if key in hollows:
                     continue
-                dj = frac[j][:2] - frac[i][:2]
-                dj -= np.round(dj)
-                dk = frac[k][:2] - frac[i][:2]
-                dk -= np.round(dk)
-                f_c = frac[i][:2] + (dj + dk) / 3.0
-                # mod AFTER rounding so a value epsilon below 1.0 folds to 0.0
-                key = tuple(np.round(np.mod(f_c, 1.0), 3) % 1.0)
-                if key in triangles:
+                k_coord = int((dd < r + 1e-3).sum())
+                if k_coord < 3:
                     continue
-                xy_c = pos[i][:2] + (_frac_mic(dj, cell2d)
-                                     + _frac_mic(dk, cell2d)) / 3.0
-                # reject degenerate triples: (i-d, i, i+d) collinear through
-                # PBC all sit at nn distance of each other, but their
-                # centroid lands on the middle atom, not on a hollow. A real
-                # hollow centroid is r_tr = nn/sqrt(3) ~ 0.58*nn from every
-                # corner atom.
-                if min(f_dist(frac[m][:2], f_c)
-                       for m in surface_indices) < 0.5 * nn:
-                    continue
-                triangles[key] = {'xy': xy_c, 'frac': f_c,
-                                  'score': f_dist(f_c, center)}
+                hollows[key] = {'xy': xy_c, 'frac': f_c, 'k': k_coord,
+                                'r': r, 'score': f_dist(f_c, center)}
+    hollow_sites = sorted(hollows.values(), key=lambda s: s['score'])
 
-    # classify hollows: a same-element atom one layer spacing straight
-    # beneath the site -> hcp; none or deeper -> fcc. The layer spacing is
-    # measured from adjacent z levels of the same-element stack -- NOT from
-    # "the atom directly beneath a surface atom": in fcc(111) ABC stacking
-    # an atom's xy re-occurs only 3 layers down, so that measurement returns
-    # 3x the true spacing and misclassifies every hollow as hcp.
-    surf_sym = symbols[surface_indices[0]]
-    z_levels = np.unique(np.round(
-        [pos[k, 2] for k in range(n_surf) if symbols[k] == surf_sym], 4))
-    d_layer = (float(np.min(np.diff(z_levels)))
-               if len(z_levels) > 1 else None)
-    fcc, hcp = [], []
-    for t in triangles.values():
-        dep = depth_below(t['frac'])
-        if dep is not None and d_layer is not None and dep < 1.5 * d_layer:
-            hcp.append({**t,
-                        'info': f'hcp hollow (subsurface atom at {dep:.2f} A)'})
-        else:
-            note = ('no subsurface atom' if dep is None
-                    else f'subsurface atom at {dep:.2f} A')
-            fcc.append({**t, 'info': f'fcc hollow ({note})'})
-    fcc.sort(key=lambda s: s['score'])
-    hcp.sort(key=lambda s: s['score'])
-
-    return {'ontop': ontop, 'bridge': bridge, 'fcc': fcc, 'hcp': hcp}
-
-
-# ─── Adsorbate site selection ────────────────────────────────────────
-
-# 'hollow' is an alias of 'fcc' (the lower-energy hollow on most metals).
-SITE_ALIASES = {'hollow': 'fcc'}
-SITE_CHOICES = ('ontop', 'bridge', 'fcc', 'hcp')
-
-
-def _frac_mic(delta_frac, cell2d):
-    """Cartesian vector of a fractional xy delta, minimum-image wrapped.
-
-    Fractional, NOT orthogonal dx % lx: the fcc(111) cell is hexagonal
-    (vectors at 120 deg) and an orthogonal wrap silently returns wrong
-    distances there (observed 2026-10-22: a spurious 2.40 A nearest
-    neighbor on Pt(111) where the true nn is 2.77 A).
-    """
-    d = np.asarray(delta_frac, dtype=float)
-    d = d - np.round(d)
-    return d @ cell2d
-
-
-def _enumerate_surface_sites(atoms, surface_indices, n_surf, z_surf, z_sign):
-    """Enumerate adsorption sites on one exposed face of the slab.
-
-    Assumes layer planes perpendicular to z (true for every surface this
-    builder constructs). In-plane geometry runs in fractional coordinates
-    (see _frac_mic). Sites are ranked by in-plane distance to the cell
-    center (0.5, 0.5), so the first site of each type is interior and
-    never on a fractional 0/1 boundary; multi-adsorbate builds rotate
-    through the ranking.
-
-    Returns {site_type: [site, ...]} where each site carries:
-      xy    cartesian (x, y) of the site
-      frac  fractional (fx, fy) of the site (may lie slightly outside [0,1))
-      score distance-to-center used for the ranking
-      info  human-readable placement note
-    """
-    pos = atoms.positions
-    cell = np.array(atoms.cell)
-    cell2d = cell[:2, :2]
-    symbols = atoms.get_chemical_symbols()
-    frac = atoms.get_scaled_positions(wrap=False)
-    center = (0.5, 0.5)
-
-    def f_dist(fa, fb):
-        return float(np.linalg.norm(
-            _frac_mic(np.asarray(fa) - np.asarray(fb), cell2d)))
-
-    # ontop: one per surface atom
-    ontop = [{'xy': pos[i][:2].copy(), 'frac': frac[i][:2],
-              'info': f'ontop of atom {i} ({symbols[i]})',
-              'score': f_dist(frac[i][:2], center)}
-             for i in surface_indices]
-    ontop.sort(key=lambda s: s['score'])
-
-    if len(surface_indices) < 2:
-        return {'ontop': ontop, 'bridge': [], 'fcc': [], 'hcp': []}
-
-    def matching_z(fxy):
-        """z of same-element atoms whose xy matches fxy (within 0.1 A)."""
-        sym = symbols[surface_indices[0]]
-        return [pos[k, 2] for k in range(n_surf)
-                if symbols[k] == sym and f_dist(frac[k][:2], fxy) <= 0.1]
-
-    def depth_below(fxy):
-        """Depth of the closest same-element atom straight through the face."""
-        depths = [z_sign * (z_surf - z) for z in matching_z(fxy)]
-        depths = [d for d in depths if d > 0.5]
-        return min(depths) if depths else None
-
-    # nearest-neighbor shell of the surface layer (in-plane)
-    nn = min(f_dist(frac[a][:2], frac[b][:2])
-             for n, a in enumerate(surface_indices)
-             for b in surface_indices[n + 1:])
-    neighbors = {i: [j for j in surface_indices
-                     if j != i
-                     and abs(f_dist(frac[i][:2], frac[j][:2]) - nn) < 0.05]
-                 for i in surface_indices}
-
-    # bridge: midpoints of nearest-neighbor pairs
-    bridge = []
-    for n, i in enumerate(surface_indices):
-        for j in neighbors[i]:
+    # ── longbridge: trough midpoints that are not hollows or nn bridges ──
+    longbridge = []
+    seen_long = set()
+    for i in range(m):
+        for j in near[i]:
             if j <= i:
                 continue
-            d = frac[j][:2] - frac[i][:2]
-            d -= np.round(d)
-            f_mid = frac[i][:2] + d / 2.0
-            xy_mid = pos[i][:2] + _frac_mic(d, cell2d) / 2.0
-            bridge.append({'xy': xy_mid, 'frac': f_mid,
-                           'info': f'bridge of atoms {i}-{j}',
-                           'score': f_dist(f_mid, center)})
-    bridge.sort(key=lambda s: s['score'])
+            sep = float(pdist[i, j])
+            if sep <= nn * 1.05:
+                continue
+            df = surf_frac[j] - surf_frac[i]
+            df -= np.round(df)
+            f_mid = surf_frac[i] + df / 2.0
+            key = key_of(f_mid)
+            if key in bridge_keys or key in hollows or key in seen_long:
+                continue
+            xy_mid = surf_xy[i] + (_frac_mic(df, cell2d)) / 2.0
+            dd = pdist_site(f_mid, surf_frac, cell2d)
+            # exactly the pair itself must be closest, i.e. a 2-fold trough
+            if (dd < sep / 2.0 - 1e-3).sum() != 0:
+                continue
+            if int((dd < sep / 2.0 + 1e-3).sum()) != 2:
+                continue
+            seen_long.add(key)
+            longbridge.append({'xy': xy_mid, 'frac': f_mid, 'k': 2,
+                               'info': f'longbridge of atoms {i}-{j}',
+                               'score': f_dist(f_mid, center)})
+    longbridge.sort(key=lambda s: s['score'])
 
-    # hollows: centroids of equilateral nearest-neighbor triangles
-    # ((111)-type packing only; each triangle is found from all three of
-    # its vertices, hence the wrapped-fraction dedupe key)
-    triangles = {}
-    for i in surface_indices:
-        nb = neighbors[i]
-        for a in range(len(nb)):
-            for b in range(a + 1, len(nb)):
-                j, k = nb[a], nb[b]
-                if abs(f_dist(frac[j][:2], frac[k][:2]) - nn) > 0.05:
-                    continue
-                dj = frac[j][:2] - frac[i][:2]
-                dj -= np.round(dj)
-                dk = frac[k][:2] - frac[i][:2]
-                dk -= np.round(dk)
-                f_c = frac[i][:2] + (dj + dk) / 3.0
-                # mod AFTER rounding so a value epsilon below 1.0 folds to 0.0
-                key = tuple(np.round(np.mod(f_c, 1.0), 3) % 1.0)
-                if key in triangles:
-                    continue
-                xy_c = pos[i][:2] + (_frac_mic(dj, cell2d)
-                                     + _frac_mic(dk, cell2d)) / 3.0
-                # reject degenerate triples: (i-d, i, i+d) collinear through
-                # PBC all sit at nn distance of each other, but their
-                # centroid lands on the middle atom, not on a hollow. A real
-                # hollow centroid is r_tr = nn/sqrt(3) ~ 0.58*nn from every
-                # corner atom.
-                if min(f_dist(frac[m][:2], f_c)
-                       for m in surface_indices) < 0.5 * nn:
-                    continue
-                triangles[key] = {'xy': xy_c, 'frac': f_c,
-                                  'score': f_dist(f_c, center)}
-
-    # classify hollows: a same-element atom one layer spacing straight
-    # beneath the site -> hcp; none or deeper -> fcc. The layer spacing is
-    # measured from adjacent z levels of the same-element stack -- NOT from
-    # "the atom directly beneath a surface atom": in fcc(111) ABC stacking
-    # an atom's xy re-occurs only 3 layers down, so that measurement returns
-    # 3x the true spacing and misclassifies every hollow as hcp.
+    # ── classify 3-fold hollows as fcc / hcp by the subsurface atom ──
+    # fcc(111) ABC stacking: an atom's xy re-occurs only 3 layers down, so
+    # the layer spacing is measured between adjacent z levels of the same
+    # element stack -- measuring to the next same-xy atom returns 3x that
+    # and misclassifies every hollow as hcp.
+    #
+    # The fcc/hcp names only mean something on a close-packed triangular
+    # net. The test is "the in-plane neighbour distance equals the bulk
+    # nearest-neighbour distance": true for fcc(111)/hcp(0001) at any c/a
+    # (Zn's 1.856 included), false for the bcc(111) net, where in-plane
+    # nn is sqrt(8/3)*a/2 -- much longer than the bulk nn -- and where the
+    # same depth rule would otherwise label every hollow fcc/hcp.
     surf_sym = symbols[surface_indices[0]]
     z_levels = np.unique(np.round(
         [pos[k, 2] for k in range(n_surf) if symbols[k] == surf_sym], 4))
     d_layer = (float(np.min(np.diff(z_levels)))
                if len(z_levels) > 1 else None)
+    bulk_nn = None
+    sub = np.array([k for k in range(n_surf) if symbols[k] == surf_sym])
+    if len(sub) > 1:
+        sdelta = frac[sub][:, None, :] - frac[sub][None, :, :]
+        sdelta -= np.round(sdelta)
+        sdist = np.linalg.norm(sdelta @ cell, axis=2)   # full 3D, not xy
+        np.fill_diagonal(sdist, np.inf)
+        bulk_nn = float(sdist.min())
+    close_packed = (bulk_nn is not None and d_layer is not None
+                    and abs(bulk_nn - nn) < 0.05 * nn)
     fcc, hcp = [], []
-    for t in triangles.values():
+    for t in hollow_sites:
+        if t['k'] != 3 or not close_packed:
+            continue
         dep = depth_below(t['frac'])
-        if dep is not None and d_layer is not None and dep < 1.5 * d_layer:
+        if dep is None:
+            # No atom anywhere beneath: the "C" site of an ABAB stack.
+            # hcp(0001) keeps this site empty through the whole slab, so it
+            # is the fcc-type hollow there.
+            fcc.append({**t, 'info': 'fcc hollow (no subsurface atom)'})
+        elif abs(dep - d_layer) < 0.25 * d_layer:
             hcp.append({**t,
-                        'info': f'hcp hollow (subsurface atom at {dep:.2f} A)'})
-        else:
-            note = ('no subsurface atom' if dep is None
-                    else f'subsurface atom at {dep:.2f} A')
-            fcc.append({**t, 'info': f'fcc hollow ({note})'})
+                        'info': f"hcp hollow (subsurface atom at {dep:.2f} A)"})
+        elif abs(dep - 2 * d_layer) < 0.25 * d_layer:
+            fcc.append({**t,
+                        'info': f"fcc hollow (subsurface atom at {dep:.2f} A)"})
     fcc.sort(key=lambda s: s['score'])
     hcp.sort(key=lambda s: s['score'])
 
-    return {'ontop': ontop, 'bridge': bridge, 'fcc': fcc, 'hcp': hcp}
+    # geometric aliases: hollowN groups by coordination number
+    by_k = {}
+    for t in hollow_sites:
+        by_k.setdefault(t['k'], []).append(
+            {**t, 'info': f"{t['k']}-fold hollow at "
+                          f"r={t['r']:.2f} A"})
+
+    return {
+        'ontop': ontop,
+        'bridge': bridge,
+        'longbridge': longbridge,
+        'fcc': fcc,
+        'hcp': hcp,
+        'hollow': fcc or by_k.get(3) or by_k.get(4) or hollow_sites,
+        'hollow3': by_k.get(3, []),
+        'hollow4': by_k.get(4, []),
+    }
 
 
 def add_adsorbates(atoms, ads_list, output_dir=None):
@@ -1063,9 +1145,9 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
         if site_type not in SITE_CHOICES:
             raise ValueError(
                 f"Unsupported adsorbate site '{ads.get('site')}' for "
-                f"'{ads['name']}': choose from ontop / bridge / fcc / hcp "
-                f"(hollow = fcc). Builds before 2026-10-22 silently "
-                f"ignored this key and always placed ontop.")
+                f"'{ads['name']}': choose from "
+                f"{' / '.join(SITE_CHOICES)}. Builds before 2026-10-22 "
+                f"silently ignored this key and always placed ontop.")
 
         # Determine candidate atoms
         if target_element:
@@ -1098,20 +1180,19 @@ def add_adsorbates(atoms, ads_list, output_dir=None):
         surface_indices = [candidate_indices[j] for j, z in enumerate(z_coords)
                           if abs(z - surf_z) < 0.5]
 
-        cache_key = (site_type, tuple(surface_indices),
-                     round(surf_z, 3), z_sign)
+        cache_key = (tuple(surface_indices), round(surf_z, 3), z_sign)
         if cache_key not in site_cache:
-            all_sites = _enumerate_surface_sites(
+            site_cache[cache_key] = _enumerate_surface_sites(
                 atoms, surface_indices, n_surf, surf_z, z_sign)
-            site_cache[cache_key] = all_sites.get(site_type, [])
-        sites = site_cache[cache_key]
+        all_sites = site_cache[cache_key]
+        sites = all_sites.get(site_type, [])
 
         if not sites:
+            available = ', '.join(k for k, v in all_sites.items() if v)
             raise ValueError(
                 f"No '{site_type}' site available on this surface "
-                f"({len(surface_indices)} surface atoms). Hollow sites "
-                f"need (111)-type triangular packing -- use ontop or "
-                f"bridge instead.")
+                f"({len(surface_indices)} surface atoms). "
+                f"Available here: {available}.")
 
         site = sites[i % len(sites)]
         fx, fy = site['frac'][0] % 1.0, site['frac'][1] % 1.0
@@ -2227,7 +2308,11 @@ def build(config_path: str):
                                          surface_cfg.get('vacuum', 15.0))
     else:
         atoms = build_slab(surface_cfg['element'], surface_cfg['miller'],
-                           surface_cfg['size'], surface_cfg['layers'], surface_cfg.get('vacuum', 15.0))
+                           surface_cfg['size'], surface_cfg['layers'],
+                           surface_cfg.get('vacuum', 15.0),
+                           structure=surface_cfg.get('structure'),
+                           a=surface_cfg.get('a'),
+                           c=surface_cfg.get('c'))
     atoms.pbc = True
 
     # Clean up extra arrays from pymatgen Interface (causes XYZ read issues)

@@ -9,7 +9,7 @@ config in, a complete VASP + LAMMPS model set out.
 
 | Structure type | Description |
 |---|---|
-| `slab` | FCC/BCC metal slabs, any Miller index (element / miller / size / layers / vacuum) |
+| `slab` | **79 elements** in their own crystal structure — fcc, bcc, hcp, diamond, sc, bct, orthorhombic, rhombohedral — any Miller index (element / miller / size / layers / vacuum, plus optional `structure` / `a` / `c` overrides) |
 | `heterojunction` | Film + substrate with automatic lattice matching (pymatgen `CoherentInterfaceBuilder`) |
 | `nanotube` | Carbon nanotubes (n, m, length) |
 | *electrolyte box* | Standalone solvent/ion boxes with no surface — also supported |
@@ -17,6 +17,13 @@ config in, a complete VASP + LAMMPS model set out.
 Adsorbates are placed **between the metal surface and the solvent**, so water
 layers pack outward from the surface and the adsorbate stays embedded in the
 electrolyte — the physically correct ordering for electrochemistry models.
+
+Site selection (`site` key) is geometric, not tied to one Miller index: hollows
+are Voronoi vertices of the surface-atom net, so `hollow3` (triangular nets),
+`hollow4` ((100)/(110)), `fcc`/`hcp` (close-packed (111)/(0001) only), `bridge`
+and `longbridge` (the (110) trough) are all derived from the actual geometry.
+Requesting a site that does not exist on a given face raises an error listing
+the ones that do.
 
 ## Electrolyte packing (EMC)
 
@@ -57,6 +64,11 @@ API key) · COD (organic crystals) · PubChem (molecules) · procedural
   densification) and re-verifies the packed box (`_verify_box_density()` warns
   loudly beyond 10% deviation). Covered by a regression test that runs without
   the EMC binary: `python tests/test_density_rescale.py`
+- **Slab geometry sweep** — `tests/test_slab_elements.py` builds every element
+  ASE has a reference structure for and asserts the slab's nearest-neighbour
+  distance equals the bulk value, the layer count and vacuum match the request,
+  and no atoms overlap. Catches the old "everything is fcc at a = 3.8 Å" failure
+  mode (Fe/W/Mo 18% short, Ti/Ru/Co/Cr 30–50% off).
 - Gap 1.5 Å / min clearance 1.5 Å between regions; 10 Å bottom / 15 Å top vacuum
 - CHARMM `water_ions` loads before `carb` to protect ion charges; an auto-water
   guard adds one H₂O when solvents/ions are requested with `water_count = 0`
@@ -95,10 +107,13 @@ and point `EMC_ROOT` at it.
 conda run -n DFTbuild python scripts\build.py examples\pt100_interface.json
 ```
 
-`examples/` ships **26 ready-to-run configs**: pure solvent boxes (charmm /
+`examples/` ships **29 ready-to-run configs**: pure solvent boxes (charmm /
 opls / pcff), water + ions, water + ethanol, Pt(100) interfaces in every force
 field, CeO₂/Pt and TiO₂/Pt heterojunctions with water or mixed solvents,
-FeN-doped CNT, CNT interface, twisted graphene, Pt(100) + CO₂ + ethanol, …
+FeN-doped CNT, CNT interface, twisted graphene, Pt(100) + CO₂ + ethanol,
+bcc Fe(110) with CO in a trough site, Pt(100) 4-fold hollows, and hcp Ru(0001)
+with an hcp-site H — the last three exercise the non-fcc slab and 4-fold /
+longbridge site paths.
 
 ## Known limitations
 
