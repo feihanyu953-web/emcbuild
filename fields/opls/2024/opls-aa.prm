@@ -2761,6 +2761,11 @@ o2	c4	c4	o2h	4.319	1	0
 o2h	c4	c4	o2h	9.508	1	0
 si4	c4	c4	si4	5.2	1	0	-0.5	2	0
 
+# DMSO sulfoxide torsions
+h1	c4	s3	o1s	0.0	3	0
+h1	c4	s3	c4	0.0	3	0
+c4	s3	c4	h1	0.0	3	0
+
 ITEM	END	# TORSION
 
 # Improper section

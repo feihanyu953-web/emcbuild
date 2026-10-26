@@ -20,7 +20,7 @@
     "ions": {"Na+": 1, "OH-": 1},
     "density": 1.0,
     "temperature": 300,
-    "field": "pcff"
+    "field": "charmm"
   },
   "output_dir": "outputs/cnt_interface"
 }

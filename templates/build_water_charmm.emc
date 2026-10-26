@@ -42,7 +42,7 @@ output		= {
   warning	-> true
 };
 
-(* ---- force fields: dual loading (order controlled by __FIELD_ORDER__) ---- *)
+(* ---- force fields: dual loading, water_ions first ---- *)
 __FIELDS__
 
 (* ---- groups ---- *)

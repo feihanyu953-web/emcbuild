@@ -488,6 +488,32 @@ Water molecules overlapping adsorbates (distance < vdw_sum × 0.7) are automatic
 - **Top vacuum**: 15 Å above the highest atom
 - **4-layer Pt(100) 3×3 surface** is a recommended minimum for realistic electrolyte models
 
+### EMC exit codes are not a success signal (fixed 2026-10-26 — do not regress)
+
+EMC returns **0 even when it aborts** on a parse or force-field error; the
+failure only shows up in its stdout as `Error: ...` / `Program aborted`.
+`build_water_layer()` checks the log for those markers and raises
+`RuntimeError` quoting EMC's own diagnostic. It also refuses to continue
+when no `water.data` appears.
+
+Before this, three defects combined into a silent failure that produced a
+model with **no electrolyte while printing "Done!"**:
+
+1. The PCFF template carried its placeholders inline — `groups = { __GROUPS__ };` —
+   while build.py replaced the indented literal `'  __GROUPS__'`. Nothing
+   matched, so EMC received `__GROUPS__` as an expression and died with
+   `Undefined variable in line 56`.
+2. The PCFF sizing block lacked the `ntotal -> 0, mtotal -> 0` tail that
+   CHARMM/OPLS use to absorb `__SIZING__`'s trailing comma, so EMC then
+   reported `Bare expression in line 84`.
+3. With no output file the code printed "using surface only" and returned
+   the bare surface — a solvated model quietly became a vacuum slab.
+
+`tests/test_emc_templates.py` pins all of this without needing the EMC
+binary: no `__TOKEN__` may survive substitution, block placeholders must own
+their line, the sizing tail must be present, EMC abort markers must be
+detected, and `pcff` + ions must be refused up front.
+
 ### Density pitfall (fixed 2026-08-27 — do not regress)
 
 The EMC templates size the box as a **cube** derived from the requested density:
@@ -551,7 +577,7 @@ Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
 ## Known Limitations
 
 - **Dual-field wildcard conflict**: carb's wildcard rule (`? ? UNK UNK 0 *`) can override water_ions' ion charges when no water is present. Auto-water guard mitigates this (see above).
-- **PCFF ion support**: PCFF uses rule-based atom typing; Na+/K+/Cl- SMILES syntax is brittle. Use CHARMM for ion-containing systems.
+- **PCFF cannot build ions at all**: the PCFF field has no ion atom types, so EMC aborts with `Type '>na' not found (field not set?)`. `field: "pcff"` plus `ions` now raises before EMC runs, naming the alternatives. Use CHARMM or OPLS for anything containing ions; PCFF is fine for ion-free solvent boxes.
 - **EMC file encoding**: templates must be ISO-8859-1 (latin-1) encoded.
 - **OH- display in POSCAR**: OH- atoms merge with water O/H (same element). Use `water.data` to verify OH- location.
 - **`water_ions_carb.prm/top`**: the EMC-bundled merged file has duplicate ITEM sections and causes segfault. This skill uses separate dual-field loading instead of the broken merged file.
@@ -570,7 +596,10 @@ Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
 | `Segfault` (exit 139) | Corrupt force field file with duplicate ITEM sections | Use clean `water_ions` + `carb` separately |
 | `EMC output not found` (molecule mode) | SMILES not recognized by PCFF | Check SMILES string; add `field: "pcff"` to config if using solvent mode |
 | `SMILES required with builder='emc'` | Missing SMILES | Add `"smiles": "..."` to the adsorbate entry |
-| `Undefined variable` | Missing comma in EMC variables block | Check generated `build_water.emc` for syntax |
+| `Undefined variable` / `Bare expression` | A template placeholder was not substituted (template and build.py out of sync) | build.py now fails before EMC with the offending token; add the token to `fill()` or move it onto its own line |
+| `EMC failed for the water layer` | EMC aborted; it exits 0 even on parse/field errors | the message quotes EMC's own diagnostic and the path of the generated `build_water.emc` |
+| `EMC reported success but wrote no water layer` | EMC finished without producing `water.data` | build.py no longer falls back to a bare surface; inspect the kept `build_water.emc` |
+| `field='pcff' cannot build ions` | PCFF has no ion atom types | use `charmm` or `opls` for ion-containing systems |
 | `!! DENSITY WARNING: ... Nx off` | `lzz` not rescaled after overriding `lxx`/`lyy` — electrolyte compressed | See "Density pitfall" above; `lzz` must be `vphase1/(lx*ly)`, not `lbox` |
 | `No lattice constant for '<El>'` | ASE has no `a` for that element (Pu) | add `"a"` to the surface config |
 | `ASE's reference data for '<El>' is marked 'cubic' but is not` | P, Mn — ASE's a = 7.17/8.89 Å is not a simple-cubic cell | pass `"structure"` + `"a"`, or a POSCAR/CIF |

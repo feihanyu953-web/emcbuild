@@ -48,7 +48,9 @@ field		= {
 
 (* define groups *)
 
-groups		= { __GROUPS__ };
+groups		= {
+  __GROUPS__
+};
 
 field		= {
   mode		-> apply,
@@ -61,7 +63,11 @@ field		= {
 
 (* sizing *)
 
-variables	= { __SIZING__ };
+variables	= {
+  __SIZING__
+  ntotal	-> 0,
+  mtotal	-> 0
+};
 
 (* interactions *)
 

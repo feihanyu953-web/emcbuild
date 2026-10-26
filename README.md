@@ -41,8 +41,7 @@ the ones that do.
 |---|---|---|---|---|
 | **CHARMM** (default) | 15 species — Na⁺ K⁺ Cl⁻ OH⁻ Li⁺ Cs⁺ Mg²⁺ Ca²⁺ Ba²⁺ Rb⁺ Zn²⁺ Cd²⁺ + PO₄³⁻ HPO₄²⁻ H₂PO₄⁻ | **91 residues** (ETOH, MEOH, THF, DMSO, NMA, … + 84 carbohydrates: aldoses, ketoses, furanoses, sugar alcohols, inositols) | TIP3 | Dual-field loading (`water_ions` first, then `carb`) so wildcard rules can't clobber ion charges |
 | **OPLS-AA** (2024) | 10 monatomic ions incl. full halides F⁻/Br⁻/I⁻ + Sr²⁺, plus OH⁻ (HYDR) | 105 residues (MEOH, DMSO, FORM, UREA, PHEN, …) | SPC/E | DMSO via patched PRM; no polyatomic anions (SO₄²⁻/NO₃⁻/CO₃²⁻ → use CHARMM) |
-| **PCFF** | Na⁺ K⁺ Cl⁻ OH⁻ only | Ethanol only | — | Rule-matched; fragile for SMILES — prefer CHARMM when ions are present |
-
+| **PCFF** | **none** — the field has no ion atom types | Ethanol only | — | Rule-matched, good for ion-free solvent boxes; `field: "pcff"` + `ions` is rejected up front |
 ## Adsorbate placement (5 strategies)
 
 1. ASE built-in molecule library
@@ -69,6 +68,11 @@ API key) · COD (organic crystals) · PubChem (molecules) · procedural
   distance equals the bulk value, the layer count and vacuum match the request,
   and no atoms overlap. Catches the old "everything is fcc at a = 3.8 Å" failure
   mode (Fe/W/Mo 18% short, Ti/Ru/Co/Cr 30–50% off).
+- **EMC guard** — EMC exits 0 even when it aborts, so `build.py` also scans its
+  log for `Error:` / `Program aborted` and raises with EMC's own diagnostic.
+  It refuses to fall back to a bare surface when a requested electrolyte was
+  not written. `tests/test_emc_templates.py` covers this plus placeholder
+  substitution for all three force fields, without needing the EMC binary.
 - Gap 1.5 Å / min clearance 1.5 Å between regions; 10 Å bottom / 15 Å top vacuum
 - CHARMM `water_ions` loads before `carb` to protect ion charges; an auto-water
   guard adds one H₂O when solvents/ions are requested with `water_count = 0`
@@ -118,7 +122,7 @@ longbridge site paths.
 ## Known limitations
 
 - OPLS does not support custom polyatomic anions (SO₄²⁻/NO₃⁻/CO₃²⁻) — use CHARMM
-- PCFF ion support is weak; prefer CHARMM for ion-containing systems
+- PCFF cannot build ions at all (no ion atom types in the field) — use CHARMM or OPLS; the code now rejects the combination before EMC runs
 - EMC templates must stay ISO-8859-1 encoded
 - OH⁻ is merged with water O/H in `POSCAR` (verify via `water.data`)
 - 4-layer Pt(100) 3×3 is the recommended minimal surface for electrolyte models

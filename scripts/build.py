@@ -14,6 +14,7 @@ This matches the user's workflow: pick an EMC example template, edit parameters,
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -1343,6 +1344,17 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
     total_solvent = sum(solvents.values())
     total_ions = sum(ions.values())
 
+    # PCFF cannot type ions: the field has no Na+/K+/Cl- atom types, so EMC
+    # aborts with "Type '>na' not found (field not set?)". Catch it here where
+    # the message can name the fix; EMC's own exit code is 0, so downstream
+    # this looks like a successful run with a silently dropped water layer.
+    if is_pcff and total_ions > 0:
+        raise ValueError(
+            f"field='pcff' cannot build ions ({', '.join(sorted(ions))}): the "
+            f"PCFF field has no ion atom types. Use field='charmm' (12 "
+            f"monatomic + 3 phosphate ions) or field='opls' (10 monatomic "
+            f"ions incl. F-/Br-/I-). PCFF is fine for ion-free solvent boxes.")
+
     # Carb field's wildcard can override ion charges when no water is present.
     # Adding a single water molecule ensures correct dual-field loading order.
     if water_count == 0 and total_solvent > 0 and total_ions > 0 and is_charmm:
@@ -1629,22 +1641,46 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
     clu_names = ', '.join(gid for _, gid, _, _ in component_list)
 
     # ---- Replace template placeholders ----
+    # Match the placeholder token alone rather than a pre-indented literal.
+    # The PCFF template used to hold `groups = { __GROUPS__ };` inline, so a
+    # replace() looking for '  __GROUPS__' silently missed it and EMC died on
+    # "Undefined variable in line 56 of input: __GROUPS__" -- while this
+    # module still printed "EMC completed successfully" (EMC exits 0 on abort).
+    def fill(name, block):
+        nonlocal content
+        token = f'__{name}__'
+        if token not in content:
+            raise ValueError(
+                f"Template {Path(template_path).name} has no {token} "
+                f"placeholder; the template and build.py are out of sync.")
+        content = content.replace(token, block)
+
     content = content.replace('__OUTPUT__', 'water')
     if is_charmm:
-        # water_ions first for water cases, carb first for solvent-only
-        if True:  # always water_ions first (auto-water ensures >=1)
-            fields_block = 'field\t\t= { mode -> charmm, name -> {wi_parameters, wi_topology}, compress -> false };\nfield\t\t= { mode -> charmm, name -> {carb_parameters, carb_topology}, compress -> false };'
-        else:
-            fields_block = 'field\t\t= { mode -> charmm, name -> {carb_parameters, carb_topology}, compress -> false };\nfield\t\t= { mode -> charmm, name -> {wi_parameters, wi_topology}, compress -> false };'
-        content = content.replace('__FIELDS__', fields_block)
-    content = content.replace('  __VARS__', '\n'.join(var_lines))
-    content = content.replace('  __GROUPS__', '\n'.join(grp_lines))
-    content = content.replace('  __SIZING__', '\n'.join(siz_lines) + '\n')
-    content = content.replace('  __CLUSTERS__', '\n'.join(clu_lines))
-    content = content.replace('__CLUSTER_NAMES__', clu_names)
+        # water_ions must load first so carb's wildcard rule cannot override
+        # the ion charges.
+        fill('FIELDS',
+             'field\t\t= { mode -> charmm, name -> {wi_parameters, wi_topology}, compress -> false };\n'
+             'field\t\t= { mode -> charmm, name -> {carb_parameters, carb_topology}, compress -> false };')
+    fill('VARS', '\n'.join(var_lines))
+    fill('GROUPS', '\n'.join(grp_lines))
+    fill('SIZING', '\n'.join(siz_lines))
+    fill('CLUSTERS', '\n'.join(clu_lines))
+    fill('CLUSTER_NAMES', clu_names)
     content = content.replace('ntotal\t-> 5000', f'ntotal\t-> {ntotal}')
     content = content.replace('density1\t-> 1.0', f'density1\t-> {density}')
     content = content.replace('temperature\t-> 300', f'temperature\t-> {temperature}')
+
+    # Nothing may survive to EMC: a leftover __TOKEN__ is a parse error far
+    # from its cause, and EMC exits 0 on parse errors. Comments are exempt --
+    # a token named in a comment is documentation, not syntax.
+    without_comments = re.sub(r'\(\*.*?\*\)', '', content, flags=re.S)
+    leftover = re.findall(r'__[A-Z][A-Z_]*__', without_comments)
+    if leftover:
+        raise ValueError(
+            f"Template {Path(template_path).name} still contains unfilled "
+            f"placeholders after substitution: {sorted(set(leftover))}. "
+            f"This is a bug in the template, not in your config.")
 
     with open(build_emc, 'w', encoding='latin-1') as f:
         f.write(content)
@@ -1695,10 +1731,22 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
         capture_output=True, text=True, env=env
     )
 
-    if result.returncode != 0:
-        print(f"  EMC stderr: {result.stderr[:200] if result.stderr else 'none'}")
-    else:
-        print(f"  EMC completed successfully")
+    # EMC exits 0 even when it aborts on a parse/field error, so the exit
+    # code alone is not a success signal. Check the log it wrote.
+    emc_stdout = result.stdout or ''
+    emc_failed = (result.returncode != 0
+                  or 'Error:' in emc_stdout
+                  or 'Program aborted' in emc_stdout)
+    if emc_failed:
+        detail = [ln.strip() for ln in emc_stdout.splitlines()
+                  if 'Error' in ln or 'aborted' in ln or 'not found' in ln]
+        raise RuntimeError(
+            f"EMC failed for the water layer (returncode="
+            f"{result.returncode}) in {output_dir}.\n"
+            f"  EMC said: {' | '.join(detail[:4]) or 'no diagnostic line'}\n"
+            f"  EMC input kept at: {build_emc}\n"
+            f"  stderr: {(result.stderr or 'none')[:300]}")
+    print(f"  EMC completed successfully")
 
     # Wait for file system to sync and check for output
     import time
@@ -1713,8 +1761,15 @@ def build_water_layer(surface_xyz: str, electrolyte_cfg: dict,
                 _verify_box_density(path, density)
                 return path
 
-    print(f"  Warning: EMC output not found, using surface only")
-    return surface_xyz
+    # Falling back to the bare surface would silently drop the electrolyte
+    # from a model the user asked to be solvated -- the output POSCAR then
+    # looks fine and the missing water is only noticed downstream. Fail.
+    raise RuntimeError(
+        f"EMC reported success but wrote no water layer in {output_dir} "
+        f"(waited 10 s). Expected one of water.data / name.data / "
+        f"water.lammps / name.lammps.\n"
+        f"  EMC input kept at: {build_emc}\n"
+        f"  EMC stdout tail: {emc_stdout[-400:].strip() or '(empty)'}")
 
 
 # ─── LAMMPS data parser ──────────────────────────────────────────────
@@ -2360,11 +2415,21 @@ def build(config_path: str):
         print(f"  {len(atoms)} atoms after adsorbates")
 
     # Step 3: Build water layer with EMC
-    print("[3/4] Building water layer with EMC...")
     elec_cfg = config.get('electrolyte', {})
-    surf_cell = atoms.cell
-    surface_cell_xy = (surf_cell[0, 0], surf_cell[1, 1])
-    water_data = build_water_layer(surface_xyz, elec_cfg, output_dir, surface_cell_xy)
+    # Say so plainly when no electrolyte was requested: printing "Building
+    # water layer" and then emitting a dry surface reads like a silent failure.
+    if not elec_cfg or not (elec_cfg.get('water_count') or
+                            elec_cfg.get('solvents') or
+                            elec_cfg.get('ethanol_count') or
+                            elec_cfg.get('ions')):
+        print("[3/4] No electrolyte requested -- dry surface only")
+        water_data = surface_xyz
+    else:
+        print("[3/4] Building water layer with EMC...")
+        surf_cell = atoms.cell
+        surface_cell_xy = (surf_cell[0, 0], surf_cell[1, 1])
+        water_data = build_water_layer(surface_xyz, elec_cfg, output_dir,
+                                       surface_cell_xy)
 
     # Step 4: Merge and output
     # Water layer starts from bare surface + gap, embedding the adsorbate
@@ -2399,4 +2464,8 @@ if __name__ == '__main__':
     if len(sys.argv) != 2:
         print("Usage: python build_v3.py <config.json>")
         sys.exit(1)
-    build(sys.argv[1])
+    try:
+        build(sys.argv[1])
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(f"\nERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
