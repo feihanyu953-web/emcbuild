@@ -23,7 +23,7 @@ emcbuild/
 ├── scripts/
 │   └── build.py                  # Main build script
 ├── templates/
-│   ├── build_water_pcff.emc      # PCFF: water + ethanol (ion support limited)
+│   ├── build_water_pcff.emc      # PCFF: water + ethanol (no ions)
 │   ├── build_water_charmm.emc    # CHARMM: dynamic placeholder template
 │   └── build_water_opls.emc      # OPLS: water + ions + organic
 ├── fields/
@@ -189,8 +189,8 @@ interlayer spacing wrong. Both paths are pinned by
 | Field | Template | Ions | Organic Solvents | Notes |
 |---|---|---|---|---|
 | `charmm` | `build_water_charmm.emc` | 12 monatomic + 3 phosphate | ✅ 91 residues | Dual-field: water_ions + carb |
-| `pcff` | `build_water_pcff.emc` | Na+, K+, Cl-, OH- | ⚠️ Ethanol only | Ion support limited (rule-based matching) |
-| `opls` | `build_water_opls.emc` | 10 monatomic (含全卤素) + OH⁻ | ✅ 105 residues | OPLS-AA 2024, 全卤素F⁻/Br⁻/I⁻ |
+| `pcff` | `build_solvent_pcff.emc` | **none** | ⚠️ Ethanol only | No ion atom types in PCFF; `pcff` + `ions` is rejected up front |
+| `opls` | `build_water_opls.emc` | 10 monatomic (含全卤素) + OH⁻ | ✅ 122 residues | OPLS-AA 2024, 全卤素F⁻/Br⁻/I⁻ |
 
 ### CHARMM Dual-Field Loading
 
@@ -260,7 +260,7 @@ All 91 carb templates are pre-loaded in `build.py`. No need to check — all are
 
 ### OPLS-AA 2024 Force Field
 
-OPLS uses **rule-based atom typing**: any SMILES that OPLS can type is supported. The EMC-bundled `opls-aa.prm/top` (2024) provides 105 pre-templated residues + 10 monatomic ions.
+OPLS uses **rule-based atom typing**: any SMILES that OPLS can type is supported. The EMC-bundled `opls-aa.prm/top` (regenerated July 2026) provides 122 pre-templated organic residues + water (SPC/E) + OH⁻ + 10 monatomic ions. `.prm` and `.top` are generated in pairs and must stay the same generation.
 
 **Water model**: SPCE (`"O"` SMILES, EMC adds H automatically).
 
@@ -286,7 +286,7 @@ All **10 monatomic ions** from OPLS-AA 2024 MAS section:
 
 #### OPLS Organic Solvents (commonly used subset)
 
-All 105 residues from EMC v9.4.4 `opls-aa.top` are supported. Notable solvents:
+All 122 organic residues in `opls-aa.top` are supported. Notable solvents:
 
 | Residue | Name | SMILES |
 |---|---|---|
