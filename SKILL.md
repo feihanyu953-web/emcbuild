@@ -574,6 +574,36 @@ Regression test: `python tests/test_density_rescale.py` (no EMC binary needed).
 | `model_report.txt` | Text | Formula, element counts, min distance, warnings |
 | `water.data` | LAMMPS data | EMC raw output (preserves CHARMM types) |
 
+## NEB Endpoint Pairs (scripts/neb_endpoints.py)
+
+For NEB calculations the two endpoint data files must carry the SAME
+slab with identical atom order/IDs, differing only in the moving atom's
+position. `scripts/neb_endpoints.py` produces such a pair from any
+EMCbuild `structure.data` (atom_style atomic): one adatom at the rank-0
+hollow of the requested type (IS) and one at its nearest adjacent
+same-type hollow (FS).
+
+```
+python scripts/neb_endpoints.py --data model/structure.data \
+    --out-dir ENDPOINTS [--height 1.8] [--site hollow4] [--element Cu]
+```
+
+- The surface-site enumeration is imported from `build.py`, so endpoint
+  placement shares the same verified interior-site logic as
+  `add_adsorbates` (never a fractional 0/1 boundary).
+- The adatom line is spliced at the text level as the LAST entry of the
+  Atoms section. EMCbuild files end with a trailing blank line, and a
+  blank line inside the Atoms section terminates it for LAMMPS -
+  appending after it produces 'Did not assign all atoms correctly' at
+  read_data (observed 2026-10-31, Cu(100) classroom case). The script
+  strips the trailing blank line before appending.
+- Both endpoints are then pre-minimized separately (input_build
+  `lammps_minimize` template, same constraints as the NEB run) before
+  the NEB input consumes them. Full verified workflow: input_build
+  `examples/L9_lammps_neb` (Cu(100) hop, E = 0.5015 eV measured).
+- Tests: `tests/test_neb_endpoints.py` (no EMC binary needed).
+
+
 ## Known Limitations
 
 - **Dual-field wildcard conflict**: carb's wildcard rule (`? ? UNK UNK 0 *`) can override water_ions' ion charges when no water is present. Auto-water guard mitigates this (see above).
